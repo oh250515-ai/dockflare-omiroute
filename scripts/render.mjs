@@ -1,97 +1,120 @@
 #!/usr/bin/env node
-// Renders .env (DockFlare) + docker-compose.omniroute.yml from config.json.
-// Zero dependencies. Node 18+.
-import { readFileSync, writeFileSync } from 'node:fs';
+// Renders .env + docker-compose.omniroute.yml + .deploy-plan from config.json.
+// Two access modes:
+//   public    (default) -> exposed on the internet via Cloudflare Tunnel (DockFlare).
+//   tailscale            -> reachable only inside your tailnet (private), no public DNS.
+// Zero deps, Node 18+.
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
-const cfgPath = process.env.CONFIG_FILE || 'config.json';
-const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
-const cf = cfg.cloudflare || {};
+const cfg = JSON.parse(readFileSync(process.env.CONFIG_FILE || 'config.json', 'utf8'));
 const omni = cfg.omniroute || {};
-
-const required = {
-  'cloudflare.apiToken': cf.apiToken,
-  'cloudflare.accountId': cf.accountId,
-  'cloudflare.zoneId': cf.zoneId,
-  'cloudflare.baseDomain': cf.baseDomain,
-};
-for (const [k, v] of Object.entries(required)) {
-  if (!v) {
-    console.error(`Missing required config: ${k}`);
-    process.exit(1);
-  }
-}
-
-const base = String(cf.baseDomain).trim();
+const access = cfg.access || {};
+const mode = String(access.mode || 'public').toLowerCase();
 const flavor = String(omni.flavor || 'base').toLowerCase();
 const versions = Array.isArray(omni.versions) && omni.versions.length ? omni.versions : ['latest'];
-const extraEnv = omni.env || {};
+const envPairs = Object.entries(omni.env || {}).filter(([, v]) => v !== '' && v != null);
 
-// --- .env for the DockFlare control plane ---
-const envLines = [
-  `CF_API_TOKEN=${cf.apiToken}`,
-  `CF_ACCOUNT_ID=${cf.accountId}`,
-  `CF_ZONE_ID=${cf.zoneId}`,
-  `TUNNEL_NAME=${cf.tunnelName || 'dockflare-omniroute'}`,
-  `CLOUDFLARED_NETWORK_NAME=cloudflare-net`,
-  `SCAN_ALL_NETWORKS=true`,
-];
+const slug = (v) => (v === 'latest' ? 'latest' : 'v' + String(v).replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, ''));
+const imageTag = (v) => (flavor === 'web' ? `${v}-web` : `${v}`);
+const envBlock = envPairs.length ? envPairs.map(([k, v]) => `      - ${k}=${v}`).join('\n') + '\n' : '';
+const health =
+  `    healthcheck:\n` +
+  `      test: ["CMD", "node", "healthcheck.mjs"]\n` +
+  `      interval: 30s\n      timeout: 5s\n      retries: 3\n      start_period: 20s\n`;
+
+let envLines = [];
+let servicesYaml = '';
+const volumes = new Set();
+let composeFiles = [];
+const urls = [];
+
+if (mode === 'tailscale') {
+  const ts = access.tailscale || {};
+  if (!ts.authKey) throw new Error('access.tailscale.authKey is required for tailscale mode');
+  envLines.push(`TS_AUTHKEY=${ts.authKey}`);
+  const tailnet = ts.tailnet || '<your-tailnet>.ts.net';
+  for (const v of versions) {
+    const s = slug(v);
+    const name = `omniroute-${s}`;
+    const tsName = `ts-${s}`;
+    servicesYaml +=
+      `\n  ${tsName}:\n` +
+      `    image: tailscale/tailscale:latest\n` +
+      `    container_name: ${tsName}\n` +
+      `    hostname: ${s}\n` +
+      `    environment:\n` +
+      `      - TS_AUTHKEY=\${TS_AUTHKEY}\n` +
+      `      - TS_HOSTNAME=${s}\n` +
+      `      - TS_STATE_DIR=/var/lib/tailscale\n` +
+      `    volumes:\n      - ${tsName}-state:/var/lib/tailscale\n` +
+      `    devices:\n      - /dev/net/tun\n` +
+      `    cap_add:\n      - NET_ADMIN\n` +
+      `    restart: unless-stopped\n` +
+      `  ${name}:\n` +
+      `    image: diegosouzapw/omniroute:${imageTag(v)}\n` +
+      `    container_name: ${name}\n` +
+      `    depends_on:\n      - ${tsName}\n` +
+      `    network_mode: service:${tsName}\n` +
+      `    restart: unless-stopped\n    stop_grace_period: 40s\n` +
+      `    volumes:\n      - ${name}-data:/app/data\n` +
+      `    environment:\n      - PORT=20128\n` +
+      envBlock +
+      health;
+    volumes.add(`${tsName}-state`);
+    volumes.add(`${name}-data`);
+    urls.push(`http://${s}.${tailnet}:20128  (tailnet-only)  ->  omniroute:${imageTag(v)}`);
+  }
+  composeFiles = ['docker-compose.omniroute.yml'];
+} else {
+  if (!existsSync('.cf-resolved.json'))
+    throw new Error('.cf-resolved.json missing; run scripts/cf-bootstrap.mjs before render in public mode');
+  const cfr = JSON.parse(readFileSync('.cf-resolved.json', 'utf8'));
+  const base = String((cfg.cloudflare || {}).domain || '').trim();
+  if (!base) throw new Error('cloudflare.domain is required in public mode');
+  envLines.push(
+    `CF_API_TOKEN=${cfr.apiToken}`,
+    `CF_ACCOUNT_ID=${cfr.accountId}`,
+    `CF_ZONE_ID=${cfr.zoneId}`,
+    `TUNNEL_NAME=${cfr.tunnelName}`,
+    `CLOUDFLARED_NETWORK_NAME=cloudflare-net`,
+    `SCAN_ALL_NETWORKS=true`,
+  );
+  for (const v of versions) {
+    const s = slug(v);
+    const name = `omniroute-${s}`;
+    const host = `${s}.${base}`;
+    servicesYaml +=
+      `\n  ${name}:\n` +
+      `    image: diegosouzapw/omniroute:${imageTag(v)}\n` +
+      `    container_name: ${name}\n` +
+      `    restart: unless-stopped\n    stop_grace_period: 40s\n` +
+      `    volumes:\n      - ${name}-data:/app/data\n` +
+      `    environment:\n      - PORT=20128\n      - NEXT_PUBLIC_BASE_URL=https://${host}\n` +
+      envBlock +
+      `    labels:\n` +
+      `      - dockflare.enable=true\n` +
+      `      - dockflare.hostname=${host}\n` +
+      `      - dockflare.service=http://${name}:20128\n` +
+      `    networks:\n      - cloudflare-net\n` +
+      health;
+    volumes.add(`${name}-data`);
+    urls.push(`https://${host}  ->  omniroute:${imageTag(v)}`);
+  }
+  composeFiles = ['docker-compose.dockflare.yml', 'docker-compose.omniroute.yml'];
+}
+
 writeFileSync('.env', envLines.join('\n') + '\n');
 
-// --- helpers ---
-const slug = (v) =>
-  v === 'latest'
-    ? 'latest'
-    : 'v' + String(v).replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-const imageTag = (v) => (flavor === 'web' ? `${v}-web` : `${v}`);
-
-// --- OmniRoute compose overlay ---
-let servicesYaml = '';
-for (const v of versions) {
-  const s = slug(v);
-  const name = `omniroute-${s}`;
-  const host = `${s}.${base}`;
-  const custom = Object.entries(extraEnv)
-    .filter(([, val]) => val !== '' && val != null)
-    .map(([k, val]) => `      - ${k}=${val}`);
-  servicesYaml +=
-    `\n  ${name}:\n` +
-    `    image: diegosouzapw/omniroute:${imageTag(v)}\n` +
-    `    container_name: ${name}\n` +
-    `    restart: unless-stopped\n` +
-    `    stop_grace_period: 40s\n` +
-    `    volumes:\n` +
-    `      - ${name}-data:/app/data\n` +
-    `    environment:\n` +
-    `      - PORT=20128\n` +
-    `      - NEXT_PUBLIC_BASE_URL=https://${host}\n` +
-    (custom.length ? custom.join('\n') + '\n' : '') +
-    `    labels:\n` +
-    `      - dockflare.enable=true\n` +
-    `      - dockflare.hostname=${host}\n` +
-    `      - dockflare.service=http://${name}:20128\n` +
-    `    networks:\n` +
-    `      - cloudflare-net\n` +
-    `    healthcheck:\n` +
-    `      test: ["CMD", "node", "healthcheck.mjs"]\n` +
-    `      interval: 30s\n` +
-    `      timeout: 5s\n` +
-    `      retries: 3\n` +
-    `      start_period: 20s\n`;
-}
-
-const volumesYaml = versions.map((v) => `  omniroute-${slug(v)}-data:`).join('\n');
-
-const compose =
-  `# AUTO-GENERATED by scripts/render.mjs — do not edit by hand.\n` +
+let compose =
+  `# AUTO-GENERATED by scripts/render.mjs (mode=${mode}) — do not edit by hand.\n` +
   `services:${servicesYaml}\n` +
-  `volumes:\n${volumesYaml}\n\n` +
-  `networks:\n` +
-  `  cloudflare-net:\n` +
-  `    name: cloudflare-net\n` +
-  `    external: true\n`;
+  `volumes:\n` + [...volumes].map((v) => `  ${v}:`).join('\n') + '\n';
+if (mode !== 'tailscale') {
+  compose += `\nnetworks:\n  cloudflare-net:\n    name: cloudflare-net\n    external: true\n`;
+}
 writeFileSync('docker-compose.omniroute.yml', compose);
 
-console.log(`Rendered .env + docker-compose.omniroute.yml`);
-for (const v of versions) {
-  console.log(`  https://${slug(v)}.${base}  ->  diegosouzapw/omniroute:${imageTag(v)}`);
-}
+writeFileSync('.deploy-plan', `MODE=${mode}\nCOMPOSE_FILES="${composeFiles.map((f) => `-f ${f}`).join(' ')}"\n`);
+
+console.log(`Rendered (mode=${mode}):`);
+urls.forEach((u) => console.log('  ' + u));
