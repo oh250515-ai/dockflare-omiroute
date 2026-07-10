@@ -1,0 +1,45 @@
+# Azure Pipelines equivalent of the GitHub Actions workflow.
+#
+# Setup:
+#   1) Pipeline > Edit > Variables > add DEPLOY_CONFIG_JSON as a SECRET variable
+#      (the same single JSON object used everywhere).
+#   2) Choose where it runs:
+#        - Microsoft-hosted agent (ephemeral): keep `vmImage: ubuntu-latest` and
+#          include a "server" block in the JSON so it deploys to your host over SSH.
+#        - Self-hosted agent (persistent): replace the `pool:` block with
+#            pool:
+#              name: 'YourSelfHostedPool'
+#          and OMIT the "server" block so it deploys on the agent's local Docker.
+#
+# Requires Docker (+ compose plugin) available to the agent.
+
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - script: |
+      if [ -z "$DEPLOY_CONFIG_JSON" ]; then
+        echo "##vso[task.logissue type=error]Missing DEPLOY_CONFIG_JSON pipeline secret"; exit 1
+      fi
+      printf '%s' "$DEPLOY_CONFIG_JSON" > config.json
+      node -e "JSON.parse(require('fs').readFileSync('config.json','utf8'))" \
+        || { echo '##vso[task.logissue type=error]DEPLOY_CONFIG_JSON is not valid JSON'; exit 1; }
+    displayName: Write config from the single secret
+    env:
+      DEPLOY_CONFIG_JSON: $(DEPLOY_CONFIG_JSON)
+
+  - script: |
+      chmod +x scripts/*.sh
+      ./scripts/ci-deploy.sh
+    displayName: Deploy
+
+  - script: rm -f config.json .cf-resolved.json ~/.ssh/id_deploy || true
+    condition: always()
+    displayName: Cleanup
