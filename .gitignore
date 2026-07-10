@@ -6,4 +6,5 @@ docker-compose.omniroute.yml
 deploy_key
 .df-seed.json
 .df-admin.txt
+.omniroute-secrets.json
 .image-cache/
