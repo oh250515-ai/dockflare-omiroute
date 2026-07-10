@@ -3,6 +3,7 @@ name: Keep-alive test
 # TEST-ONLY. Runs the full stack on the ephemeral GitHub-hosted runner and holds
 # the job open (up to ~6h) so you can reach it from the internet while it lives.
 # Triggers on manual dispatch AND whenever this file changes on main.
+# rev: 2 (now seeds DockFlare config headlessly — no setup wizard needed)
 on:
   workflow_dispatch:
     inputs:
@@ -46,4 +47,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f config.json .cf-resolved.json || true
+        run: rm -f config.json .cf-resolved.json .df-seed.json || true
