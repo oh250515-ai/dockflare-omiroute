@@ -1,0 +1,85 @@
+# OmniRoute services — TAILSCALE (private, tailnet-only) variant.
+# Used when config.access.mode = "tailscale". Each version rides a Tailscale
+# sidecar and is reachable only inside your tailnet (no public DNS, no DockFlare).
+# Edit here to add/remove versions. Env from .env: TS_AUTHKEY, TAILNET, JWT_SECRET,
+# API_KEY_SECRET.
+services:
+  ts-latest:
+    image: tailscale/tailscale:latest
+    container_name: ts-latest
+    hostname: latest
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_HOSTNAME=latest
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - ts-latest-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+  omniroute-latest:
+    image: diegosouzapw/omniroute:latest
+    container_name: omniroute-latest
+    depends_on: [ts-latest]
+    network_mode: service:ts-latest
+    restart: unless-stopped
+    stop_grace_period: 40s
+    volumes:
+      - omniroute-latest-data:/app/data
+    environment:
+      - PORT=20128
+      - NEXT_PUBLIC_BASE_URL=http://latest.${TAILNET}:20128
+      - JWT_SECRET=${JWT_SECRET}
+      - API_KEY_SECRET=${API_KEY_SECRET}
+      - AUTH_COOKIE_SECURE=false
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  ts-v3-8-45:
+    image: tailscale/tailscale:latest
+    container_name: ts-v3-8-45
+    hostname: v3-8-45
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_HOSTNAME=v3-8-45
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - ts-v3-8-45-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+  omniroute-v3-8-45:
+    image: diegosouzapw/omniroute:3.8.45
+    container_name: omniroute-v3-8-45
+    depends_on: [ts-v3-8-45]
+    network_mode: service:ts-v3-8-45
+    restart: unless-stopped
+    stop_grace_period: 40s
+    volumes:
+      - omniroute-v3-8-45-data:/app/data
+    environment:
+      - PORT=20128
+      - NEXT_PUBLIC_BASE_URL=http://v3-8-45.${TAILNET}:20128
+      - JWT_SECRET=${JWT_SECRET}
+      - API_KEY_SECRET=${API_KEY_SECRET}
+      - AUTH_COOKIE_SECURE=false
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  ts-latest-state:
+  ts-v3-8-45-state:
+  omniroute-latest-data:
+  omniroute-v3-8-45-data:
