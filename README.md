@@ -7,66 +7,70 @@ it reuses the upstream projects as prebuilt Docker images driven by labels + env
 - OmniRoute: https://github.com/diegosouzapw/OmniRoute (image `diegosouzapw/omniroute`)
 - DockFlare: https://github.com/ChrispyBacon-dev/DockFlare (image `alplat/dockflare`)
 
+## Architecture (how the pieces fit)
+
+Two clean layers, nothing generated at deploy time:
+
+1. **Committed compose = the services.** `docker-compose.dockflare.yml` (control plane)
+   and `docker-compose.omniroute.yml` (one service per OmniRoute version). To change
+   versions/ports/hostnames, **edit these files** — they are the source of truth.
+2. **One pre-compose step = secret → `.env`.** `scripts/prepare-env.mjs` reads the single
+   `DEPLOY_CONFIG_JSON` secret and produces the `.env` the compose files consume: it turns
+   Cloudflare email+globalApiKey (or a given token) into the **scoped token + account + zone**
+   DockFlare needs, and generates the stable **OmniRoute session secrets**. Then `docker compose up`.
+
+That's the whole design: static compose you can read/edit, plus a tiny translator that
+fills in the dynamic values right before start. No compose is generated.
+
 ## One secret, minimal config
 
-Everything is one JSON object in the secret `DEPLOY_CONFIG_JSON`. Minimum:
+`DEPLOY_CONFIG_JSON` only carries what must become **env** (Cloudflare creds + optional
+Docker Hub login). Versions/ports live in compose, not here. Minimum:
 
 ```json
 {
-  "cloudflare": { "email": "you@example.com", "globalApiKey": "...", "domain": "omni.example.com" },
-  "omniroute": { "versions": ["latest", "3.8.45"] }
+  "cloudflare": { "email": "you@example.com", "globalApiKey": "...", "domain": "omni.example.com" }
 }
 ```
 
-From just email + global key + domain we auto-derive the Cloudflare **account ID**,
-**zone ID**, and **mint the scoped token** DockFlare needs. Everything else
-(`apiToken`, `accountId`, `zoneId`, `server`, `flavor`, `env`, `access`, `dockerhub`) is
-optional with fallbacks. See [`config.example.json`](config.example.json) and [`DEPLOY.md`](DEPLOY.md).
-
-## How it works
-
-1. A bootstrap step resolves Cloudflare creds from the one secret.
-2. DockFlare is **seeded headlessly** (encrypted config written directly) so it boots
- straight into Operational Mode, then creates/owns a Cloudflare Tunnel + `cloudflared`.
-3. Each OmniRoute **version** runs from `diegosouzapw/omniroute:<version>` (no build).
-4. DockFlare reads each container's labels and auto-creates hostname + DNS + ingress.
-5. Reach each version at its own subdomain: `latest.<domain>`, `v3-8-45.<domain>`, …
+Optional keys: `cloudflare.apiToken` / `accountId` / `zoneId` / `tunnelName` (fallbacks that
+skip auto-derivation), `dockerhub.{username,token}` (faster pulls), `dockflare.{username,password}`
+(admin login), `access.mode="tailscale"` + `access.tailscale.{authKey,tailnet}` (private).
+See [`config.example.json`](config.example.json) and [`DEPLOY.md`](DEPLOY.md).
 
 ## Ports & labels (how a hostname/CNAME is created)
 
 **The only port that matters is the app's INTERNAL port** (what it listens on inside the
-container). You set it in `dockflare.service`. In public mode you do **not** publish ports
-to the host — the tunnel reaches the container over the shared `cloudflare-net` network.
-
-The three labels that create a public hostname:
+container). In public mode you do **not** publish ports to the host — the tunnel reaches the
+container over the shared `cloudflare-net` network. The three labels that create a public
+hostname (already set on each service in `docker-compose.omniroute.yml`):
 
 ```yaml
-services:
-  myapp:
-    image: some/app:tag
-    container_name: myapp
-    networks: [cloudflare-net]                 # MUST share this network with DockFlare
     labels:
       - dockflare.enable=true
-      - dockflare.hostname=app.example.com      # -> DockFlare creates CNAME 'app' in zone example.com
-      - dockflare.service=http://myapp:8080     # http://<container-name>:<internal-port>
+      - dockflare.hostname=latest.${BASE_DOMAIN}     # -> DockFlare creates CNAME 'latest'
+      - dockflare.service=http://omniroute-latest:20128   # http://<container>:<internal-port>
+    networks: [cloudflare-net]                          # MUST share this network with DockFlare
 ```
 
-- **Same internal port across apps is fine** as long as **container names differ**. This repo
-  runs `omniroute-latest:20128` and `omniroute-v3-8-45:20128` side by side — same 20128, two
-  separate containers, routed by hostname. What must be unique: `container_name`, `dockflare.hostname`,
-  and any host-published port (avoid publishing at all in public mode).
+- **Same internal port across services is fine** as long as **container names differ**. Both
+  OmniRoute services listen on 20128 — separate containers, routed by hostname. Must be unique:
+  `container_name` and `dockflare.hostname`.
 - The app must bind `0.0.0.0` (not `127.0.0.1`), or the tunnel gets a 502.
-- Find an app's internal port from its `EXPOSE`/`PORT` (e.g. n8n 5678, Grafana 3000, Nextcloud 80, code-server 8080).
+- `${BASE_DOMAIN}` is filled from `.env` (from `cloudflare.domain`).
 
-**Full guide with per-install-method examples (prebuilt image / build from source / npm /
+**Adding a version = copy a service block** in `docker-compose.omniroute.yml`, change the
+name, image tag, `hostname` subdomain, and volume. Nothing else to touch.
+
+Full guide with per-install-method examples (prebuilt image / build from source / npm /
 non-Docker), path-based routing, Access protection, common traps, and a ready-to-use AI-agent
-prompt:** [`docs/DOCKFLARE-FOR-ANY-APP.md`](docs/DOCKFLARE-FOR-ANY-APP.md).
+prompt: [`docs/DOCKFLARE-FOR-ANY-APP.md`](docs/DOCKFLARE-FOR-ANY-APP.md).
 
 ## Access modes
 
-- **public** (default): internet-facing via Cloudflare Tunnel.
-- **tailscale**: private, tailnet-only. Set `access.mode = "tailscale"` + `access.tailscale.authKey`.
+- **public** (default): internet-facing via Cloudflare Tunnel (`docker-compose.omniroute.yml`).
+- **tailscale**: private, tailnet-only (`docker-compose.omniroute.tailscale.yml`). Set
+  `access.mode = "tailscale"` + `access.tailscale.authKey` in the secret.
 
 ## Deploy targets
 
@@ -90,7 +94,7 @@ The keep-alive run dies with the runner. For something that stays up, pick one:
 ### Option A — Your own server over SSH (simplest)
 Add a `server` block to `DEPLOY_CONFIG_JSON` and run **Deploy** (not keep-alive):
 ```json
-{ "cloudflare": { "...": "..." }, "omniroute": { "versions": ["latest","3.8.45"] },
+{ "cloudflare": { "...": "..." },
   "server": { "host": "1.2.3.4", "user": "deploy", "port": 22, "path": "/opt/dockflare-omniroute",
               "sshKey": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----" } }
 ```
@@ -103,14 +107,15 @@ Install a GitHub Actions runner on your always-on box, set repo variable
 machine's own Docker. Same idea on Azure: swap `pool.vmImage` for your self-hosted `pool.name`.
 
 Either way the state lives in Docker volumes (`dockflare_data`, `omniroute-*-data`), so the
-tunnel + config survive restarts. Re-running the deploy is idempotent (seed is skipped if present).
+tunnel + config survive restarts. Re-running the deploy is idempotent (seed is skipped if
+present; session secrets in `.omniroute-secrets.json` stay stable so you're not logged out).
 
 ## Speed
 
-Three layers, all in `scripts/lib.sh` + `scripts/image-cache.sh`:
+Three layers, in `scripts/lib.sh` + `scripts/image-cache.sh`:
 1. **Docker Hub login** (optional `dockerhub` block) for a higher/faster pull rate.
 2. **Parallel prepull** of all images (compose pulls sequentially; images are ~400MB each).
-3. **Image cache** between CI runs (`docker save`/`load` a tarball; keyed by the image list).
+3. **Image cache** between CI runs (`docker save`/`load` a tarball; keyed by the compose image list).
 
 ## Debugging
 
@@ -131,19 +136,20 @@ Real problems we hit getting this live, and how each was found/fixed. Check here
 | 1 | Stack "green" but URL dies minutes later | GitHub/Azure **hosted** runners are ephemeral — destroyed at job end, taking the tunnel with them | Use a **self-hosted runner** or a `server` block (remote host over SSH). `keepalive.yml` is only for temporary testing. |
 | 2 | Container up, but **no DNS / no tunnel ever created** | DockFlare only configures itself once its **encrypted config** (`dockflare_config.dat` + `dockflare.key`) exists. `CF_API_TOKEN` env just **pre-fills the setup wizard**; a human still had to click through it | Headless seed: `scripts/seed-dockflare.py` writes that encrypted config directly, run **inside the DockFlare image** so crypto/hash libs match. Diagnostics **section 2** shows if the config is present. |
 | 3 | `ci-deploy.sh exited non-zero` on the very first line, nothing ran | `read` consumed `node`'s output which had **no trailing newline** → `read` returns non-zero at EOF → `set -e` aborted immediately | Use `console.log` (newline) not `process.stdout.write`, plus `|| true` guard. Spotted via `bash -x` verbose deploy in the CI log. |
-| 4 | Tunnel create → **403 code 10000 Authentication error**; DNS never appears | The minted token had **zero account-scoped permissions** — we matched permission groups by **name**, and Cloudflare had renamed them (e.g. "Cloudflare Tunnel" → "Cloudflare One Connector: cloudflared"), so the account policy came out empty. Tunnel is account-scoped | `scripts/cf-bootstrap.mjs` now partitions permission groups by their declared **`scopes`** (grant ALL account groups + ALL zone groups), and **verifies** the new token can list tunnels before proceeding. Look for `Permission groups resolved: account=N zone=M` and `Token verification OK`. Seen in diagnostics **section 4**. |
+| 4 | Tunnel create → **403 code 10000 Authentication error**; DNS never appears | The minted token had **zero account-scoped permissions** — we matched permission groups by **name**, and Cloudflare had renamed them (e.g. "Cloudflare Tunnel" → "Cloudflare One Connector: cloudflared"), so the account policy came out empty. Tunnel is account-scoped | `scripts/prepare-env.mjs` now partitions permission groups by their declared **`scopes`** (grant ALL account groups + ALL zone groups), and **verifies** the new token can list tunnels before proceeding. Look for `Permission groups resolved: account=N zone=M` and `Token verification OK`. |
 | 5 | Log spam: `access.api.error.not_enabled` (Access/Zero Trust) | Zero Trust Access isn't initialized on the account | **Harmless in public mode** — DockFlare falls back to a local policy reference. Only matters if you use Access policies. |
 | 6 | Slow first run (re-downloads ~400MB per image) | Anonymous, sequential pulls | Add the `dockerhub` block, rely on parallel prepull + image cache (see **Speed**). First run is always cold. |
-| 7 | OmniRoute shows **(unhealthy)** / `file data stream has unexpected number of bytes` | **RESOLVED: false-negative, not an outage.** OmniRoute's own Docker healthcheck fails in some network setups (upstream [#3151](https://github.com/diegosouzapw/OmniRoute/issues/3151) / [#296](https://github.com/diegosouzapw/OmniRoute/issues/296)) even though the app serves fine on `:20128`. The `file data stream` line is a non-fatal Next.js static-asset warning. Verified: the public URL returns the real app | `scripts/deploy.sh` no longer blocks only on Docker health — it also accepts a container that **actually serves HTTP** on 20128. If a URL genuinely 502s, check diagnostics **section 7** and try a different `versions` tag. |
+| 7 | OmniRoute shows **(unhealthy)** / `file data stream has unexpected number of bytes` | **RESOLVED: false-negative.** OmniRoute's own Docker healthcheck fails in some network setups (upstream [#3151](https://github.com/diegosouzapw/OmniRoute/issues/3151) / [#296](https://github.com/diegosouzapw/OmniRoute/issues/296)) even though the app serves fine on `:20128`. The `file data stream` line is a non-fatal Next.js static-asset warning | `scripts/deploy.sh` no longer blocks only on Docker health — it also accepts a container that **actually serves HTTP** on 20128. If a URL genuinely 502s, check diagnostics **section 7**. |
+| 8 | Log in succeeds, then **every click bounces back to `/login`** | OmniRoute signs session cookies with `JWT_SECRET`; we weren't passing it, so the app used an unstable default and couldn't re-verify the cookie. Behind HTTPS it also needs `AUTH_COOKIE_SECURE=true` | `scripts/prepare-env.mjs` generates & **persists** `JWT_SECRET` + `API_KEY_SECRET` (in `.omniroute-secrets.json`, stable across redeploys) and sets `AUTH_COOKIE_SECURE=true`; the compose services consume them from `.env`. |
 
 ### Fast triage order
 
-1. **CI log**: did `ci-deploy.sh` print `Cloudflare resolved: ...` and `Token verification OK`? If not → issue #3 or #4.
+1. **CI log**: did `prepare-env.mjs` print `Prepared .env ...` and `Token verification OK`? If not → issue #3 or #4.
 2. **Section 2**: is the DockFlare config seeded? If not → issue #2.
 3. **Section 4**: any `403` / `Authentication error` / `code 10000`? → issue #4 (token perms).
 4. **Section 6**: is the `cloudflared` connector running? No connector = tunnel wasn't created (issue #4).
 5. **Section 8**: are the CNAMEs live yet? `Status:3` = NXDOMAIN (DockFlare hasn't created them). `Status:0` = created.
-6. **Section 7**: OmniRoute healthy? If URL resolves but 502s → issue #7 (usually a false-negative).
+6. **Section 7**: OmniRoute serving? If URL resolves but 502s → issue #7. If login loops → issue #8.
 
 ## Sổ tay xử lý sự cố (tiếng Việt)
 
@@ -151,27 +157,29 @@ Các lỗi thật đã gặp khi đưa hệ thống lên, kèm cách phát hiệ
 
 | # | Triệu chứng | Nguyên nhân gốc | Cách sửa / dấu hiệu nhận biết |
 | --- | --- | --- | --- |
-| 1 | Stack "xanh" nhưng URL chết sau vài phút | Runner **hosted** của GitHub/Azure là máy dùng-một-lần, hết job là xoá, kéo theo tunnel | Dùng **self-hosted runner** hoặc khối `server` (host qua SSH). `keepalive.yml` chỉ để test tạm. |
-| 2 | Container chạy nhưng **không có DNS / không tạo tunnel** | DockFlare chỉ cấu hình khi có **file config mã hóa**. Đặt `CF_API_TOKEN` chỉ **điền sẵn wizard**, vẫn phải bấm tay | Seed headless: `scripts/seed-dockflare.py` ghi thẳng config, chạy **bằng chính image DockFlare**. Kiểm tra section 2 của `diagnose.sh`. |
-| 3 | `ci-deploy.sh` thoát ngay dòng đầu, không chạy gì | `read` đọc output của `node` **thiếu newline cuối** -> `read` trả exit ≠ 0 -> `set -e` giết script | Dùng `console.log` (có newline) thay `process.stdout.write`, thêm chặn `|| true`. Phát hiện nhờ `bash -x`. |
-| 4 | Tạo tunnel -> **403 code 10000**; DNS không bao giờ lên | Token mint ra **không có quyền account** vì match permission-group theo **tên** mà Cloudflare đã đổi tên. Tunnel là account-scoped | `cf-bootstrap.mjs` giờ phân loại group theo **`scopes`** (cấp toàn bộ account + zone) và **verify** token trước. Tìm dòng `Permission groups resolved` + `Token verification OK`. |
-| 5 | Log spam `access.api.error.not_enabled` | Zero Trust chưa bật trên account | **Vô hại ở public mode** — DockFlare dùng policy cục bộ. Chỉ quan trọng nếu dùng Access. |
-| 6 | Lần đầu chạy chậm (tải lại ~400MB/image) | Pull ẩn danh, tuần tự | Thêm khối `dockerhub`, dùng prepull song song + image cache (mục **Speed**). Lần đầu luôn nguội. |
-| 7 | OmniRoute báo **(unhealthy)** | **Đã xử lý: false-negative, không phải chết.** Healthcheck của OmniRoute lỗi trong một số setup mạng (upstream #3151/#296) dù app vẫn phục vụ trên `:20128`. Đã xác minh URL công khai trả về app thật | `deploy.sh` không còn chỉ chờ Docker health, mà chấp nhận container **đang phục vụ HTTP**. Nếu URL thật sự 502 -> soi section 7, thử tag `versions` khác. |
+| 1 | Stack "xanh" nhưng URL chết sau vài phút | Runner **hosted** là máy dùng-một-lần, hết job là xoá, kéo theo tunnel | Dùng **self-hosted runner** hoặc khối `server` (SSH). `keepalive.yml` chỉ để test tạm. |
+| 2 | Container chạy nhưng **không có DNS / không tạo tunnel** | DockFlare chỉ cấu hình khi có **file config mã hóa**. Đặt `CF_API_TOKEN` chỉ **điền sẵn wizard** | Seed headless `scripts/seed-dockflare.py` (chạy bằng chính image DockFlare). Kiểm section 2 của `diagnose.sh`. |
+| 3 | `ci-deploy.sh` thoát ngay dòng đầu | `read` đọc output `node` **thiếu newline** -> `set -e` giết script | Dùng `console.log` + chặn `|| true`. Phát hiện nhờ `bash -x`. |
+| 4 | Tạo tunnel -> **403 code 10000**; DNS không lên | Token mint ra **không có quyền account** vì match permission-group theo **tên** đã bị Cloudflare đổi | `prepare-env.mjs` cấp group theo **`scopes`** (toàn bộ account+zone) và **verify** token. Tìm `Permission groups resolved` + `Token verification OK`. |
+| 5 | Log spam `access.api.error.not_enabled` | Zero Trust chưa bật | **Vô hại ở public mode.** Chỉ quan trọng nếu dùng Access. |
+| 6 | Lần đầu chạy chậm (tải ~400MB/image) | Pull ẩn danh, tuần tự | Thêm `dockerhub`, dùng prepull song song + image cache. |
+| 7 | OmniRoute báo **(unhealthy)** | **False-negative** (upstream #3151/#296), app vẫn serve trên `:20128` | `deploy.sh` chấp nhận container **đang serve HTTP**. Nếu 502 thật -> soi section 7. |
+| 8 | Đăng nhập xong **bị đá về `/login`** khi click | Thiếu `JWT_SECRET` (cookie phiên không verify được) + thiếu `AUTH_COOKIE_SECURE` sau HTTPS | `prepare-env.mjs` sinh & **giữ cố định** `JWT_SECRET`/`API_KEY_SECRET` + bật `AUTH_COOKIE_SECURE=true`. |
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `scripts/cf-bootstrap.mjs` | Resolve Cloudflare account/zone + mint & verify scoped token |
+| `docker-compose.dockflare.yml` | DockFlare control plane (public mode) — committed, editable |
+| `docker-compose.omniroute.yml` | OmniRoute services, one per version — **edit here to add/change versions** |
+| `docker-compose.omniroute.tailscale.yml` | OmniRoute services for private (tailnet-only) mode |
+| `scripts/prepare-env.mjs` | The one pre-compose step: secret → `.env` (Cloudflare token/account/zone + OmniRoute secrets) |
 | `scripts/seed-dockflare.py` | Headlessly seed DockFlare's encrypted config (run inside its image) |
-| `scripts/render.mjs` | Generate `.env` + OmniRoute compose for the chosen access mode |
-| `scripts/deploy.sh` | On-host: bootstrap → pull → seed → `docker compose up` → readiness wait |
+| `scripts/deploy.sh` | On-host: prepare-env → seed → `docker compose up` → readiness wait |
 | `scripts/ci-deploy.sh` | Pick local (self-hosted) vs remote (SSH) from the `server` block |
 | `scripts/diagnose.sh` | 9-section diagnostics snapshot |
-| `scripts/image-cache.sh` / `scripts/lib.sh` | Image caching + shared helpers (host node, parallel pull, docker login) |
+| `scripts/image-cache.sh` / `scripts/lib.sh` | Image caching (reads compose) + shared helpers (host node, parallel pull, docker login) |
 | `scripts/keepalive.sh` | Test-only: deploy on runner, probe URLs, hold job open |
-| `docker-compose.dockflare.yml` | DockFlare control plane (public mode only) |
 | `docs/DOCKFLARE-FOR-ANY-APP.md` | Reusable playbook: expose any app via DockFlare (VN) |
 | `.github/workflows/deploy.yml` / `azure-pipelines.yml` | CI entrypoints (image cache built in) |
 | `.github/workflows/keepalive.yml` | Test-only keep-alive workflow |
