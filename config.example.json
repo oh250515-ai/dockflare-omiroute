@@ -4,9 +4,6 @@
     "globalApiKey": "YOUR_CLOUDFLARE_GLOBAL_API_KEY",
     "domain": "omni.example.com"
   },
-  "omniroute": {
-    "versions": ["latest", "3.8.45"]
-  },
   "dockerhub": {
     "username": "YOUR_DOCKERHUB_USERNAME",
     "token": "YOUR_DOCKERHUB_ACCESS_TOKEN"
