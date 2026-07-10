@@ -77,4 +77,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f config.json .cf-resolved.json .df-seed.json || true
+        run: rm -f config.json .df-seed.json || true
