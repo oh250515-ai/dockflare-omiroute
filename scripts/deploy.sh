@@ -29,10 +29,35 @@ docker_login
 echo "Pre-pulling images in parallel..."
 "${NODE[@]}" scripts/image-list.mjs | prepull_parallel
 
+# --- Seed DockFlare headlessly (public mode) -------------------------------
+# Without this, DockFlare sits in Pre-Flight Mode waiting for the web wizard and
+# never creates the tunnel/DNS. We write its encrypted config using DockFlare's
+# OWN image so the crypto/hash libs match exactly.
+if [ "$MODE" != "tailscale" ]; then
+  "${NODE[@]}" -e '
+    const fs=require("fs"), crypto=require("crypto");
+    const r=JSON.parse(fs.readFileSync(".cf-resolved.json","utf8"));
+    const c=JSON.parse(fs.readFileSync("config.json","utf8"));
+    const d=c.dockflare||{};
+    const pw=d.password||crypto.randomBytes(18).toString("base64url");
+    const seed={
+      cf_api_token:r.apiToken, cf_account_id:r.accountId, cf_zone_id:r.zoneId||null,
+      tunnel_name:r.tunnelName||"dockflare-omniroute",
+      username:d.username||"admin", password:pw, master_api_key:d.masterApiKey||null,
+    };
+    fs.writeFileSync(".df-seed.json", JSON.stringify(seed));
+    fs.writeFileSync(".df-admin.txt", "DockFlare admin login — user: "+seed.username+"  password: "+pw+"\n");
+  '
+  echo "Seeding DockFlare config (headless, no wizard)..."
+  docker run --rm -v dockflare_data:/app/data -v "$PWD":/work -w /work \
+    --entrypoint python alplat/dockflare:stable scripts/seed-dockflare.py
+  cat .df-admin.txt 2>/dev/null || true
+  rm -f .df-seed.json
+fi
+
 # shellcheck disable=SC2086
 COMPOSE=(docker compose $COMPOSE_FILES)
 
-# Images are already local now; this is effectively a no-op verify.
 "${COMPOSE[@]}" up -d --remove-orphans
 
 echo "Waiting for OmniRoute containers to report healthy..."
