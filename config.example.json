@@ -1,23 +1,10 @@
 {
   "cloudflare": {
-    "apiToken": "YOUR_CLOUDFLARE_API_TOKEN",
-    "accountId": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-    "zoneId": "YOUR_CLOUDFLARE_ZONE_ID",
-    "tunnelName": "dockflare-omniroute",
-    "baseDomain": "omni.example.com"
-  },
-  "server": {
-    "host": "YOUR_SERVER_IP_OR_HOST",
-    "user": "deploy",
-    "port": 22,
-    "path": "/opt/dockflare-omniroute",
-    "sshKey": "-----BEGIN OPENSSH PRIVATE KEY-----\n...single-line-escaped...\n-----END OPENSSH PRIVATE KEY-----"
+    "email": "you@example.com",
+    "globalApiKey": "YOUR_CLOUDFLARE_GLOBAL_API_KEY",
+    "domain": "omni.example.com"
   },
   "omniroute": {
-    "flavor": "base",
-    "versions": ["latest", "3.8.45"],
-    "env": {
-      "OPENROUTER_API_KEY": ""
-    }
+    "versions": ["latest", "3.8.45"]
   }
 }
