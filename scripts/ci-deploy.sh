@@ -12,10 +12,14 @@ source "$(dirname "$0")/lib.sh"
 
 [ -f config.json ] || { echo "config.json not found (expected the DEPLOY_CONFIG_JSON secret written here)" >&2; exit 1; }
 
+# NOTE: `console.log` (not process.stdout.write) so the line ends in a newline.
+# Without the trailing newline, `read` returns non-zero at EOF and `set -e`
+# aborts the whole script on this very first step. The trailing `|| true` is a
+# second guard so a missing newline can never kill the run again.
 read -r HAS_SERVER HOST SSH_USER SSH_PORT RPATH < <("${NODE[@]}" -e '
   const s=(JSON.parse(require("fs").readFileSync("config.json","utf8")).server)||{};
-  process.stdout.write([s.host?"yes":"no", s.host||"-", s.user||"root", s.port||22, s.path||"/opt/dockflare-omniroute"].join(" "));
-')
+  console.log([s.host?"yes":"no", s.host||"-", s.user||"root", s.port||22, s.path||"/opt/dockflare-omniroute"].join(" "));
+') || true
 
 chmod +x scripts/*.sh || true
 
