@@ -1,8 +1,8 @@
 name: Deploy
 
+# Manual-only: real deployments target a persistent host (self-hosted runner or server.*).
+# The push-triggered path for testing is handled by keepalive.yml.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -11,9 +11,6 @@ concurrency:
 
 jobs:
   deploy:
-    # Repo variable DEPLOY_RUNNER lets you switch between GitHub-hosted and self-hosted.
-    #   hosted:      leave unset (defaults to ubuntu-latest) -> deploys to server.* over SSH
-    #   self-hosted: set DEPLOY_RUNNER to 'self-hosted' (or your label) -> deploys locally, omit server.*
     runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
