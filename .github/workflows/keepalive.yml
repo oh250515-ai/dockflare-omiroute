@@ -1,0 +1,49 @@
+name: Keep-alive test
+
+# TEST-ONLY. Runs the full stack on the ephemeral GitHub-hosted runner and holds
+# the job open (up to ~6h) so you can reach it from the internet while it lives.
+# Triggers on manual dispatch AND whenever this file changes on main.
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to hold the job open (max ~330)"
+        required: false
+        default: "330"
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/keepalive.yml'
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write config from the single secret
+        env:
+          DEPLOY_CONFIG_JSON: ${{ secrets.DEPLOY_CONFIG_JSON }}
+        run: |
+          if [ -z "${DEPLOY_CONFIG_JSON}" ]; then
+            echo "::error::Missing repository secret DEPLOY_CONFIG_JSON"; exit 1
+          fi
+          printf '%s' "${DEPLOY_CONFIG_JSON}" > config.json
+          node -e "JSON.parse(require('fs').readFileSync('config.json','utf8'))" \
+            || { echo '::error::DEPLOY_CONFIG_JSON is not valid JSON'; exit 1; }
+
+      - name: Deploy on runner + keep alive until reachable
+        env:
+          KEEPALIVE_MINUTES: ${{ github.event.inputs.minutes || '330' }}
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/keepalive.sh
+
+      - name: Cleanup
+        if: always()
+        run: rm -f config.json .cf-resolved.json || true
