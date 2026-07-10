@@ -1,0 +1,72 @@
+# OmniRoute services — THE source of truth. Edit here to add/remove versions.
+# All dynamic values come from .env (written by scripts/prepare-env.mjs before
+# `compose up`). To add a version: copy a service block, change the name, image
+# tag, hostname subdomain, and volume. Nothing else generates this file.
+#
+# Rules that matter:
+#   - container_name + dockflare.hostname must be UNIQUE per service.
+#   - internal port 20128 can be the SAME across services (separate containers).
+#   - all services join the external `cloudflare-net` so DockFlare can route them.
+#
+# Env consumed here (from .env): BASE_DOMAIN, JWT_SECRET, API_KEY_SECRET, AUTH_COOKIE_SECURE.
+services:
+  omniroute-latest:
+    image: diegosouzapw/omniroute:latest
+    container_name: omniroute-latest
+    restart: unless-stopped
+    stop_grace_period: 40s
+    volumes:
+      - omniroute-latest-data:/app/data
+    environment:
+      - PORT=20128
+      - NEXT_PUBLIC_BASE_URL=https://latest.${BASE_DOMAIN}
+      - JWT_SECRET=${JWT_SECRET}
+      - API_KEY_SECRET=${API_KEY_SECRET}
+      - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE:-true}
+    labels:
+      - dockflare.enable=true
+      - dockflare.hostname=latest.${BASE_DOMAIN}
+      - dockflare.service=http://omniroute-latest:20128
+    networks:
+      - cloudflare-net
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  omniroute-v3-8-45:
+    image: diegosouzapw/omniroute:3.8.45
+    container_name: omniroute-v3-8-45
+    restart: unless-stopped
+    stop_grace_period: 40s
+    volumes:
+      - omniroute-v3-8-45-data:/app/data
+    environment:
+      - PORT=20128
+      - NEXT_PUBLIC_BASE_URL=https://v3-8-45.${BASE_DOMAIN}
+      - JWT_SECRET=${JWT_SECRET}
+      - API_KEY_SECRET=${API_KEY_SECRET}
+      - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE:-true}
+    labels:
+      - dockflare.enable=true
+      - dockflare.hostname=v3-8-45.${BASE_DOMAIN}
+      - dockflare.service=http://omniroute-v3-8-45:20128
+    networks:
+      - cloudflare-net
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  omniroute-latest-data:
+  omniroute-v3-8-45-data:
+
+networks:
+  cloudflare-net:
+    name: cloudflare-net
+    external: true
