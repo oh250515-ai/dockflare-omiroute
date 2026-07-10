@@ -26,10 +26,39 @@ jobs:
           node -e "JSON.parse(require('fs').readFileSync('config.json','utf8'))" \
             || { echo '::error::DEPLOY_CONFIG_JSON is not valid JSON'; exit 1; }
 
-      - name: Deploy
+      # --- Docker image cache (no builds here; we cache the PULLED prebuilt images) ---
+      - name: Compute image cache key
+        id: imgkey
         run: |
           chmod +x scripts/*.sh
-          ./scripts/ci-deploy.sh
+          echo "key=$(./scripts/image-cache.sh key)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Docker image cache
+        id: imgcache
+        uses: actions/cache/restore@v4
+        with:
+          path: .image-cache
+          key: ${{ steps.imgkey.outputs.key }}
+          restore-keys: |
+            imgcache-
+
+      - name: Load cached images into Docker
+        if: hashFiles('.image-cache/**') != ''
+        run: ./scripts/image-cache.sh load .image-cache
+
+      - name: Deploy
+        run: ./scripts/ci-deploy.sh
+
+      - name: Save Docker image cache
+        if: always() && steps.imgcache.outputs.cache-hit != 'true'
+        run: ./scripts/image-cache.sh save .image-cache || true
+
+      - name: Persist Docker image cache
+        if: always() && steps.imgcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .image-cache
+          key: ${{ steps.imgkey.outputs.key }}
 
       - name: Cleanup
         if: always()
