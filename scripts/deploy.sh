@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Runs ON the Docker host. Only requirement: Docker (with the compose plugin).
-# Node is not required on the host — we run the JS helpers in a throwaway container.
+# Uses host Node when available; otherwise falls back to a node container.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck disable=SC1091
+source "$(dirname "$0")/lib.sh"
 
 [ -f config.json ] || { echo "config.json not found in $(pwd)" >&2; exit 1; }
-
-NODE=(docker run --rm -v "$PWD":/w -w /w node:24-alpine node)
 
 MODE=$("${NODE[@]}" -e "process.stdout.write(((JSON.parse(require('fs').readFileSync('config.json','utf8')).access||{}).mode||'public').toLowerCase())")
 
@@ -22,10 +22,15 @@ if [ "$MODE" != "tailscale" ]; then
   docker network inspect cloudflare-net >/dev/null 2>&1 || docker network create cloudflare-net
 fi
 
+# Pull every image up front, in parallel. This is the big speedup vs. compose's
+# sequential pulls — the OmniRoute images are ~400MB each.
+echo "Pre-pulling images in parallel..."
+"${NODE[@]}" scripts/image-list.mjs | prepull_parallel
+
 # shellcheck disable=SC2086
 COMPOSE=(docker compose $COMPOSE_FILES)
 
-"${COMPOSE[@]}" pull
+# Images are already local now; this is effectively a no-op verify.
 "${COMPOSE[@]}" up -d --remove-orphans
 
 echo "Waiting for OmniRoute containers to report healthy..."
