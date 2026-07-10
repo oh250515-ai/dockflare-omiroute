@@ -1,4 +1,6 @@
-# DockFlare control plane. Cloudflare config comes from .env (rendered from config.json).
+# DockFlare control plane. Config is seeded headlessly into dockflare_data before
+# this starts (scripts/seed-dockflare.py), so DockFlare boots straight into
+# Operational Mode. CF_* env are kept as a harmless import fallback.
 services:
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.4.1
@@ -73,7 +75,9 @@ services:
 
 volumes:
   dockflare_data:
+    name: dockflare_data
   dockflare_redis:
+    name: dockflare_redis
 
 networks:
   cloudflare-net:
