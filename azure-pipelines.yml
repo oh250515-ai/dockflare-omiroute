@@ -21,6 +21,10 @@ trigger:
 pool:
   vmImage: ubuntu-latest
 
+variables:
+  # Filled at runtime from the image list; used as the cache key.
+  IMAGE_CACHE_KEY: 'bootstrap'
+
 steps:
   - checkout: self
 
@@ -35,10 +39,38 @@ steps:
     env:
       DEPLOY_CONFIG_JSON: $(DEPLOY_CONFIG_JSON)
 
+  # Compute the image cache key and expose it as a pipeline variable for Cache@2.
   - script: |
       chmod +x scripts/*.sh
+      KEY=$(./scripts/image-cache.sh key)
+      echo "##vso[task.setvariable variable=IMAGE_CACHE_KEY]$KEY"
+      echo "Image cache key: $KEY"
+    displayName: Compute image cache key
+
+  # Cache the PULLED prebuilt Docker images (no builds here). Restores before deploy,
+  # saves .image-cache after the job on a cache miss.
+  - task: Cache@2
+    displayName: Cache Docker images
+    inputs:
+      key: '"$(IMAGE_CACHE_KEY)"'
+      restoreKeys: |
+        imgcache-
+      path: '$(Build.SourcesDirectory)/.image-cache'
+
+  - script: |
+      ./scripts/image-cache.sh load .image-cache || true
+    displayName: Load cached images into Docker
+
+  - script: |
       ./scripts/ci-deploy.sh
     displayName: Deploy
+
+  # Populate the cache dir so Cache@2 stores it at job end (Cache@2 saves automatically
+  # when the key was not found on restore).
+  - script: |
+      ./scripts/image-cache.sh save .image-cache || true
+    displayName: Save images to cache dir
+    condition: always()
 
   - script: rm -f config.json .cf-resolved.json ~/.ssh/id_deploy || true
     condition: always()
