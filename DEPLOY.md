@@ -1,7 +1,11 @@
 # Deploy guide
 
-Everything is driven by **one** secret: `DEPLOY_CONFIG_JSON` — a single JSON object.
-The absolute minimum is Cloudflare login + a domain + which versions to run:
+Everything is driven by **one** secret: `DEPLOY_CONFIG_JSON` (a single JSON object).
+Design in one line: **committed compose files define the services; one small step
+(`scripts/prepare-env.mjs`) turns the secret into the `.env` those files consume, then
+`docker compose up`.** No compose is generated at deploy time.
+
+Minimum secret:
 
 ```json
 {
@@ -9,94 +13,111 @@ The absolute minimum is Cloudflare login + a domain + which versions to run:
     "email": "you@example.com",
     "globalApiKey": "YOUR_CLOUDFLARE_GLOBAL_API_KEY",
     "domain": "omni.example.com"
-  },
-  "omniroute": {
-    "versions": ["latest", "3.8.45"]
   }
 }
 ```
 
-Everything else is optional and has a fallback. Full field reference below.
-
 ---
 
-## Config reference (what each field does)
+## What goes in the secret (and what does NOT)
+
+The secret only carries values that must become **environment** for DockFlare/OmniRoute.
+**Versions, ports and hostnames are NOT here** — they live in `docker-compose.omniroute.yml`.
 
 ### `cloudflare` (required)
 
 | Field | Required? | What it does |
 | --- | --- | --- |
-| `email` | Yes* | Your Cloudflare login email. Used with `globalApiKey` to talk to the Cloudflare API. |
-| `globalApiKey` | Yes* | Your Global API Key (dash > My Profile > API Tokens > Global API Key). From this we auto-derive the account ID, the zone ID, and we **mint a scoped API token** with exactly the permissions DockFlare needs (DockFlare only accepts a scoped token, not the global key). |
-| `domain` | Yes | The hostname your versions live under, e.g. `omni.example.com`. Each version becomes a subdomain: `latest.omni.example.com`, `v3-8-45.omni.example.com`. The domain (or its parent) must already be added to Cloudflare — we look up the zone automatically. |
-| `apiToken` | No (fallback) | A scoped API token. If set, it's used directly and `email`/`globalApiKey` are not needed. This is the "current" method; the global key is just the easier primary path. |
-| `accountId` | No (fallback) | Skip account auto-discovery. Needed only if your login sees **multiple** accounts. |
-| `zoneId` | No (fallback) | Skip zone auto-discovery. Provide it if you'd rather not have us resolve it from `domain`. |
-| `tunnelName` | No | Name of the Cloudflare Tunnel DockFlare creates/owns. Default `dockflare-omniroute`. |
+| `email` | Yes* | Cloudflare login email; used with `globalApiKey` to call the API. |
+| `globalApiKey` | Yes* | Global API Key. From it, `prepare-env` auto-derives account ID, zone ID, and **mints a scoped token** DockFlare needs (DockFlare only accepts a scoped Bearer token, not the global key). |
+| `domain` | Yes | Base domain, e.g. `omni.example.com`. Becomes `${BASE_DOMAIN}` in `.env`; the compose services build `latest.<domain>`, `v3-8-45.<domain>` from it. Must already be a Cloudflare zone. |
+| `apiToken` | No (fallback) | A ready scoped token. If set, used directly; `email`/`globalApiKey` not needed. |
+| `accountId` | No (fallback) | Skip account auto-discovery (needed if your login sees multiple accounts). |
+| `zoneId` | No (fallback) | Skip zone auto-discovery. |
+| `tunnelName` | No | Cloudflare Tunnel name DockFlare creates. Default `dockflare-omniroute`. |
 
-*Either (`email` + `globalApiKey`) **or** `apiToken` must be present.
+*Either (`email` + `globalApiKey`) **or** `apiToken`.
 
-> The scoped token we mint gets: Cloudflare Tunnel write, Account Settings read, Access (Apps/Policies/Orgs) write, Service Tokens write, Zone read, DNS write. If minting ever fails (Cloudflare renames permission groups occasionally), just drop a scoped `apiToken` into the config and it uses that instead.
+### `dockerhub` (optional — faster pulls)
 
-### `omniroute` (required)
+| Field | What it does |
+| --- | --- |
+| `username` / `token` | `docker login` before pulling, for a higher/faster Docker Hub rate limit. Omit to pull anonymously. |
 
-| Field | Required? | What it does |
-| --- | --- | --- |
-| `versions` | Yes | List of OmniRoute versions to run in parallel, e.g. `["latest", "3.8.45"]`. Each runs as its own container from the prebuilt image `diegosouzapw/omniroute:<version>` and gets its own subdomain. Add/remove entries and re-run to scale. |
-| `flavor` | No | `base` (default, lean ~250MB) or `web` (adds Chromium/Playwright for web-cookie providers like gemini-web / claude-turnstile). `web` pulls the `<version>-web` image tag. |
-| `env` | No | Extra environment values passed to every OmniRoute container (e.g. provider API keys). OmniRoute also runs fine with none and lets you configure providers in its UI. |
+### `dockflare` (optional — admin login)
 
-### `server` (optional — see "Where it runs")
-
-Omit it entirely when deploying on a **self-hosted / persistent runner** (the runner's own machine is the Docker host). Include it to deploy to a **remote host over SSH** (required when using ephemeral GitHub/Azure hosted runners).
-
-| Field | Required? | What it does |
-| --- | --- | --- |
-| `host` | Yes (if block present) | Remote host IP/DNS. Its presence is the switch: present = SSH to remote; absent = deploy locally on the runner. |
-| `user` | No | SSH user (default `root`). Should be able to run `docker`. |
-| `port` | No | SSH port (default `22`). |
-| `path` | No | Remote directory to sync into (default `/opt/dockflare-omniroute`). |
-| `sshKey` | Yes (if block present) | SSH **private** key (its public half in the host's `authorized_keys`). Newlines as real `\n` or escaped. |
+| Field | What it does |
+| --- | --- |
+| `username` / `password` | DockFlare UI admin login seeded headlessly. If omitted: user `admin`, random password (printed in the deploy log / `.df-admin.txt`). |
 
 ### `access` (optional — public vs private)
 
-| Field | Required? | What it does |
-| --- | --- | --- |
-| `mode` | No | `public` (default) = exposed on the internet via Cloudflare Tunnel. `tailscale` = reachable **only inside your tailnet** (private), no public DNS, DockFlare/Cloudflare not used. |
-| `tailscale.authKey` | Yes (if `mode=tailscale`) | A Tailscale auth key (tskey-…). Each version joins your tailnet as its own node. |
-| `tailscale.tailnet` | No | Your tailnet name (e.g. `tailXXXX.ts.net`), only used to print the right URLs. |
+| Field | What it does |
+| --- | --- |
+| `mode` | `public` (default) = internet via Cloudflare Tunnel. `tailscale` = tailnet-only, uses `docker-compose.omniroute.tailscale.yml`, no DockFlare/Cloudflare. |
+| `tailscale.authKey` | Required if `mode=tailscale`. A `tskey-…` auth key. |
+| `tailscale.tailnet` | Your tailnet name (for the printed URLs). |
+
+### `server` (optional — remote host over SSH)
+
+Omit for a self-hosted/persistent runner (deploy on the runner's own Docker). Include to
+deploy to a remote host (required with ephemeral hosted runners).
+
+| Field | What it does |
+| --- | --- |
+| `host` | Remote host IP/DNS. Its presence switches to SSH mode. |
+| `user` / `port` / `path` | SSH user (default `root`), port (22), remote dir (`/opt/dockflare-omniroute`). |
+| `sshKey` | SSH **private** key (public half in the host's `authorized_keys`). |
 
 ---
 
-## Where it runs (the `server` question)
+## Changing versions / ports / hostnames
 
-OmniRoute is a **long-running service**, so it needs a persistent Docker host. GitHub/Azure **hosted** runners are ephemeral — they're deleted when the job ends — so they can't host it. Two supported shapes:
+Edit **`docker-compose.omniroute.yml`** (not the secret). To add a version, copy a service
+block and change: `container_name`, `image` tag, the `hostname` subdomain, and the volume
+name. `${BASE_DOMAIN}`, `${JWT_SECRET}`, `${API_KEY_SECRET}` are filled from `.env`
+automatically. Full patterns + examples for other apps: [`docs/DOCKFLARE-FOR-ANY-APP.md`](docs/DOCKFLARE-FOR-ANY-APP.md).
 
-1. **Hosted runner + remote host (SSH).** Include the `server` block. The pipeline runs on a throwaway runner, rsyncs the repo to your host, and runs the deploy there.
-2. **Self-hosted / persistent runner.** Install a GitHub Actions runner (or Azure agent) on your own always-on box, **omit** the `server` block, and it deploys on that same machine's Docker — no SSH at all. This is the "runs directly in the pipeline" case.
+## Where it runs
+
+OmniRoute is a **long-running service**, so it needs a persistent Docker host. Hosted
+GitHub/Azure runners are ephemeral. Two supported shapes:
+
+1. **Hosted runner + remote host (SSH).** Include the `server` block.
+2. **Self-hosted / persistent runner.** Omit `server`; set repo var `DEPLOY_RUNNER=self-hosted`
+   (GitHub) or a self-hosted `pool.name` (Azure). Deploys on that machine's own Docker.
 
 ## Platforms
 
 | Platform | File | Runner choice |
 | --- | --- | --- |
-| GitHub Actions | `.github/workflows/deploy.yml` | Repo variable `DEPLOY_RUNNER` (unset = `ubuntu-latest` hosted; set to `self-hosted` for your box) |
-| Azure Pipelines | `azure-pipelines.yml` | `pool.vmImage` (hosted) or swap to `pool.name` of your self-hosted pool |
+| GitHub Actions | `.github/workflows/deploy.yml` | `DEPLOY_RUNNER` repo var (unset = hosted) |
+| Azure Pipelines | `azure-pipelines.yml` | `pool.vmImage` (hosted) or `pool.name` (self-hosted) |
 
-Both call the same `scripts/ci-deploy.sh`, which auto-picks local vs remote from the `server` block.
+Both call `scripts/ci-deploy.sh` → `scripts/deploy.sh`, which runs `prepare-env` then
+`docker compose up` from the committed files. Docker-image caching is built into both.
 
 ## Steps
 
-1. Fill in `config.example.json`, collapse to the secret:
+1. Fill in `config.example.json`, save it as the secret:
    - GitHub: repo > Settings > Secrets and variables > Actions > new secret `DEPLOY_CONFIG_JSON`.
    - Azure: Pipeline > Edit > Variables > secret variable `DEPLOY_CONFIG_JSON`.
 2. (Self-hosted only) register the runner/agent on your Docker host and set the runner selector.
-3. Push to `main` (or run the workflow/pipeline manually). It bootstraps Cloudflare, renders compose, `docker compose up -d`, and waits for every OmniRoute container to be healthy.
+3. Run **Deploy** (push to `main` on a self-hosted runner, or workflow_dispatch). It runs
+   `prepare-env` → seeds DockFlare → `docker compose up` → waits until OmniRoute is serving.
 
 ## Verify
 
-- Public mode: `https://latest.<domain>`, `https://v3-8-45.<domain>`, … (DockFlare UI on host `:5000`).
-- Tailscale mode: `http://latest.<tailnet>.ts.net:20128`, etc., reachable only from your tailnet.
+- Public: `https://latest.<domain>`, `https://v3-8-45.<domain>` (DockFlare UI on host `:5000`).
+- Tailscale: `http://latest.<tailnet>.ts.net:20128`, reachable only from your tailnet.
 
-## Scaling versions later
+## Testing quickly (no persistent host)
 
-Edit `omniroute.versions` in the secret and re-run. New versions get their own container + hostname; removed ones are cleaned up (`--remove-orphans`), and in public mode DockFlare tears down their DNS/ingress after its grace period.
+Run the **Keep-alive test** workflow. It deploys on the ephemeral hosted runner and holds the
+job open (~5.5h) with live diagnostics so you can reach the URLs while it lives. It tears down
+when the job ends — not for real use.
+
+## If something breaks
+
+See the **Troubleshooting log** in [`README.md`](README.md) (8 real issues + fast triage order)
+and run `scripts/diagnose.sh` for a full snapshot.
