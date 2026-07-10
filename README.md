@@ -37,6 +37,29 @@ optional with fallbacks. See [`config.example.json`](config.example.json) and [`
 - **public** (default): internet-facing via Cloudflare Tunnel.
 - **tailscale**: private, tailnet-only. Set `access.mode = "tailscale"` + `access.tailscale.authKey`.
 
+## Ports & CNAME labels (quick reference)
+
+Two kinds of port — don't confuse them:
+- **Internal port** = what the app listens on inside its container (e.g. `20128`). **This is what DockFlare needs.**
+- **Published port** (`ports:` in compose) = maps to the host. **Not needed** with a tunnel; leave it out for a cleaner, closed setup.
+
+`dockflare.service` must point at `http://<service-name>:<internal-port>` — never `localhost`, never a published host port.
+
+Both OmniRoute versions here listen on the **same** internal port `20128`, and that's fine: each is its own container and DockFlare routes by **hostname**, not port. Ports only collide if you publish them to the host (we don't).
+
+The three labels that create a public hostname + its CNAME:
+
+```yaml
+labels:
+  - dockflare.enable=true
+  - dockflare.hostname=sub.example.com          # DockFlare creates the CNAME in the covering Cloudflare zone
+  - dockflare.service=http://mycontainer:20128  # internal target; the port MUST match the app's PORT env
+```
+
+Changing the port means changing **both** the app's `PORT` env **and** the number in `dockflare.service`.
+Full detail (path-based routing, HTTPS origin, Access, per-app examples) is in
+[`docs/APP-EXAMPLES.md`](docs/APP-EXAMPLES.md).
+
 ## Deploy targets
 
 | Platform | File |
@@ -88,8 +111,10 @@ logs, cloudflared connector, per-version OmniRoute health, live DNS, network mem
 The keep-alive workflow runs it after deploy and every ~2 min while waiting, and runs the
 deploy with `bash -x` so every command shows in the CI log.
 
-Exposing a **different** app with this same DockFlare setup? See
-[`docs/DOCKFLARE-FOR-ANY-APP.md`](docs/DOCKFLARE-FOR-ANY-APP.md) (reusable playbook, in Vietnamese).
+Exposing a **different** app with this same DockFlare setup? Read these (Vietnamese):
+- [`docs/APP-EXAMPLES.md`](docs/APP-EXAMPLES.md) — how ports work + full label reference + examples (Docker image / build from source / npm).
+- [`docs/DOCKFLARE-FOR-ANY-APP.md`](docs/DOCKFLARE-FOR-ANY-APP.md) — the general playbook + traps.
+- [`docs/AGENT-PROMPT.md`](docs/AGENT-PROMPT.md) — a copy-paste prompt to hand an agent, with the known-traps checklist baked in.
 
 ## Troubleshooting log (issues hit during bring-up)
 
@@ -141,7 +166,9 @@ Các lỗi thật đã gặp khi đưa hệ thống lên, kèm cách phát hiệ
 | `scripts/image-cache.sh` / `scripts/lib.sh` | Image caching + shared helpers (host node, parallel pull, docker login) |
 | `scripts/keepalive.sh` | Test-only: deploy on runner, probe URLs, hold job open |
 | `docker-compose.dockflare.yml` | DockFlare control plane (public mode only) |
+| `docs/APP-EXAMPLES.md` | Ports + label reference + per-app examples (Docker/source/npm) (VN) |
 | `docs/DOCKFLARE-FOR-ANY-APP.md` | Reusable playbook: expose any app via DockFlare (VN) |
+| `docs/AGENT-PROMPT.md` | Copy-paste agent prompt + known-traps checklist (VN) |
 | `.github/workflows/deploy.yml` / `azure-pipelines.yml` | CI entrypoints (image cache built in) |
 | `.github/workflows/keepalive.yml` | Test-only keep-alive workflow |
 | `config.example.json` | Shape of the single `DEPLOY_CONFIG_JSON` secret |
