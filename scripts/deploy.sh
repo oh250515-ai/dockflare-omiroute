@@ -22,8 +22,10 @@ if [ "$MODE" != "tailscale" ]; then
   docker network inspect cloudflare-net >/dev/null 2>&1 || docker network create cloudflare-net
 fi
 
-# Pull every image up front, in parallel. This is the big speedup vs. compose's
-# sequential pulls — the OmniRoute images are ~400MB each.
+# Authenticate to Docker Hub (if creds in config) for a higher/faster pull rate,
+# then pull every image up front in parallel. This is the big speedup vs. compose's
+# sequential anonymous pulls — the OmniRoute images are ~400MB each.
+docker_login
 echo "Pre-pulling images in parallel..."
 "${NODE[@]}" scripts/image-list.mjs | prepull_parallel
 
