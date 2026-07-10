@@ -1,6 +1,5 @@
 config.json
 .env
-docker-compose.omniroute.yml
 .cf-resolved.json
 .deploy-plan
 deploy_key
