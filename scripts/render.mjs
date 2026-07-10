@@ -5,6 +5,7 @@
 //   tailscale            -> reachable only inside your tailnet (private), no public DNS.
 // Zero deps, Node 18+.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 
 const cfg = JSON.parse(readFileSync(process.env.CONFIG_FILE || 'config.json', 'utf8'));
 const omni = cfg.omniroute || {};
@@ -12,11 +13,51 @@ const access = cfg.access || {};
 const mode = String(access.mode || 'public').toLowerCase();
 const flavor = String(omni.flavor || 'base').toLowerCase();
 const versions = Array.isArray(omni.versions) && omni.versions.length ? omni.versions : ['latest'];
-const envPairs = Object.entries(omni.env || {}).filter(([, v]) => v !== '' && v != null);
 
 const slug = (v) => (v === 'latest' ? 'latest' : 'v' + String(v).replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, ''));
 const imageTag = (v) => (flavor === 'web' ? `${v}-web` : `${v}`);
-const envBlock = envPairs.length ? envPairs.map(([k, v]) => `      - ${k}=${v}`).join('\n') + '\n' : '';
+
+// --- OmniRoute required secrets --------------------------------------------
+// OmniRoute signs its dashboard session cookies with JWT_SECRET and encrypts
+// stored API keys with API_KEY_SECRET. If JWT_SECRET is absent the app runs with
+// an insecure/unstable default, so a fresh session cookie can't be re-verified on
+// the next request -> you log in, then every click bounces back to /login.
+// Behind the HTTPS Cloudflare tunnel we ALSO need AUTH_COOKIE_SECURE=true so the
+// cookie is accepted. We generate the secrets once and PERSIST them to
+// .omniroute-secrets.json so they stay stable across redeploys (on a persistent
+// host); regenerating them every deploy would silently log everyone out.
+const SECRETS_FILE = '.omniroute-secrets.json';
+let secrets;
+if (existsSync(SECRETS_FILE)) {
+  secrets = JSON.parse(readFileSync(SECRETS_FILE, 'utf8'));
+} else {
+  secrets = {
+    JWT_SECRET: randomBytes(48).toString('base64'),
+    API_KEY_SECRET: randomBytes(32).toString('hex'),
+  };
+  writeFileSync(SECRETS_FILE, JSON.stringify(secrets));
+}
+
+// Base env applied to every OmniRoute container. User-supplied omniroute.env wins.
+const baseEnv = {
+  PORT: '20128',
+  JWT_SECRET: secrets.JWT_SECRET,
+  API_KEY_SECRET: secrets.API_KEY_SECRET,
+  AUTH_COOKIE_SECURE: 'true', // served over HTTPS via the tunnel
+};
+if (omni.initialPassword) baseEnv.INITIAL_PASSWORD = String(omni.initialPassword);
+const userEnv = omni.env || {};
+
+// Build the merged env lines for a given public base URL (host-specific).
+function envLinesFor(publicUrl) {
+  const merged = { ...baseEnv };
+  if (publicUrl) merged.NEXT_PUBLIC_BASE_URL = publicUrl;
+  for (const [k, v] of Object.entries(userEnv)) {
+    if (v !== '' && v != null) merged[k] = v; // user override wins
+  }
+  return Object.entries(merged).map(([k, v]) => `      - ${k}=${v}`).join('\n') + '\n';
+}
+
 const health =
   `    healthcheck:\n` +
   `      test: ["CMD", "node", "healthcheck.mjs"]\n` +
@@ -37,6 +78,7 @@ if (mode === 'tailscale') {
     const s = slug(v);
     const name = `omniroute-${s}`;
     const tsName = `ts-${s}`;
+    const publicUrl = `http://${s}.${tailnet}:20128`;
     servicesYaml +=
       `\n  ${tsName}:\n` +
       `    image: tailscale/tailscale:latest\n` +
@@ -57,12 +99,12 @@ if (mode === 'tailscale') {
       `    network_mode: service:${tsName}\n` +
       `    restart: unless-stopped\n    stop_grace_period: 40s\n` +
       `    volumes:\n      - ${name}-data:/app/data\n` +
-      `    environment:\n      - PORT=20128\n` +
-      envBlock +
+      `    environment:\n` +
+      envLinesFor(publicUrl) +
       health;
     volumes.add(`${tsName}-state`);
     volumes.add(`${name}-data`);
-    urls.push(`http://${s}.${tailnet}:20128  (tailnet-only)  ->  omniroute:${imageTag(v)}`);
+    urls.push(`${publicUrl}  (tailnet-only)  ->  omniroute:${imageTag(v)}`);
   }
   composeFiles = ['docker-compose.omniroute.yml'];
 } else {
@@ -89,8 +131,8 @@ if (mode === 'tailscale') {
       `    container_name: ${name}\n` +
       `    restart: unless-stopped\n    stop_grace_period: 40s\n` +
       `    volumes:\n      - ${name}-data:/app/data\n` +
-      `    environment:\n      - PORT=20128\n      - NEXT_PUBLIC_BASE_URL=https://${host}\n` +
-      envBlock +
+      `    environment:\n` +
+      envLinesFor(`https://${host}`) +
       `    labels:\n` +
       `      - dockflare.enable=true\n` +
       `      - dockflare.hostname=${host}\n` +
