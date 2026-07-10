@@ -11,11 +11,14 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # Repo variable DEPLOY_RUNNER lets you switch between GitHub-hosted and self-hosted.
+    #   hosted:      leave unset (defaults to ubuntu-latest) -> deploys to server.* over SSH
+    #   self-hosted: set DEPLOY_RUNNER to 'self-hosted' (or your label) -> deploys locally, omit server.*
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Load the single config secret
+      - name: Write config from the single secret
         env:
           DEPLOY_CONFIG_JSON: ${{ secrets.DEPLOY_CONFIG_JSON }}
         run: |
@@ -26,44 +29,11 @@ jobs:
           node -e "JSON.parse(require('fs').readFileSync('config.json','utf8'))" \
             || { echo '::error::DEPLOY_CONFIG_JSON is not valid JSON'; exit 1; }
 
-      - name: Extract server connection
-        id: srv
+      - name: Deploy
         run: |
-          node -e '
-            const fs=require("fs");
-            const c=JSON.parse(fs.readFileSync("config.json","utf8")).server||{};
-            for(const k of ["host","user","sshKey"]){
-              if(!c[k]){ console.error("Missing server."+k); process.exit(1); }
-            }
-            const out=process.env.GITHUB_OUTPUT;
-            fs.appendFileSync(out,`host=${c.host}\n`);
-            fs.appendFileSync(out,`user=${c.user}\n`);
-            fs.appendFileSync(out,`port=${c.port||22}\n`);
-            fs.appendFileSync(out,`path=${c.path||"/opt/dockflare-omniroute"}\n`);
-            const key=c.sshKey.endsWith("\n")?c.sshKey:c.sshKey+"\n";
-            fs.writeFileSync("deploy_key",key,{mode:0o600});
-          '
+          chmod +x scripts/*.sh
+          ./scripts/ci-deploy.sh
 
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          mv deploy_key ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -p "${{ steps.srv.outputs.port }}" -H "${{ steps.srv.outputs.host }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Sync repo to host
-        run: |
-          rsync -az --delete \
-            -e "ssh -i ~/.ssh/id_deploy -p ${{ steps.srv.outputs.port }}" \
-            --exclude '.git' \
-            ./ "${{ steps.srv.outputs.user }}@${{ steps.srv.outputs.host }}:${{ steps.srv.outputs.path }}/"
-
-      - name: Deploy on host
-        run: |
-          ssh -i ~/.ssh/id_deploy -p "${{ steps.srv.outputs.port }}" \
-            "${{ steps.srv.outputs.user }}@${{ steps.srv.outputs.host }}" \
-            "cd '${{ steps.srv.outputs.path }}' && chmod +x scripts/deploy.sh && ./scripts/deploy.sh"
-
-      - name: Cleanup local secrets
+      - name: Cleanup
         if: always()
-        run: rm -f ~/.ssh/id_deploy config.json
+        run: rm -f config.json .cf-resolved.json ~/.ssh/id_deploy || true
