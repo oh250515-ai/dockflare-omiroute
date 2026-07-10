@@ -1,55 +1,63 @@
 # dockflare-omiroute
 
-Config-only deployment that publishes **OmniRoute** to the internet through
-**Cloudflare Tunnel**, using **DockFlare** to auto-manage the tunnel, DNS and
-Zero Trust Access. No application code — it reuses the upstream open-source
-projects as-is (prebuilt Docker images + labels).
+Config-only deployment that publishes **OmniRoute** through **Cloudflare Tunnel**
+(managed by **DockFlare**) — or privately over **Tailscale**. No application code;
+it reuses the upstream projects as prebuilt Docker images driven by labels + env.
 
 - OmniRoute: https://github.com/diegosouzapw/OmniRoute (image `diegosouzapw/omniroute`)
 - DockFlare: https://github.com/ChrispyBacon-dev/DockFlare (image `alplat/dockflare`)
 
+## One secret, minimal config
+
+Everything is one JSON object in the secret `DEPLOY_CONFIG_JSON`. Minimum:
+
+```json
+{
+  "cloudflare": { "email": "you@example.com", "globalApiKey": "...", "domain": "omni.example.com" },
+  "omniroute": { "versions": ["latest", "3.8.45"] }
+}
+```
+
+From just email + global key + domain we auto-derive the Cloudflare **account ID**,
+**zone ID**, and **mint the scoped token** DockFlare needs. Everything else
+(`apiToken`, `accountId`, `zoneId`, `server`, `flavor`, `env`, `access`) is optional
+with fallbacks. See [`config.example.json`](config.example.json) and [`DEPLOY.md`](DEPLOY.md).
+
 ## How it works
 
-1. **DockFlare** (control plane) reads your Cloudflare credentials from `.env`,
-   creates/owns a Cloudflare Tunnel and runs its own `cloudflared` connector.
-2. Each **OmniRoute version** runs as its own container from the official
-   prebuilt image (`diegosouzapw/omniroute:<version>`). No building.
-3. DockFlare sees each OmniRoute container's labels and automatically creates a
-   public hostname + DNS record + tunnel ingress rule for it.
-4. You reach each version at its own subdomain:
-   - `latest`  → `https://latest.<baseDomain>`
-   - `3.8.45`  → `https://v3-8-45.<baseDomain>`
+1. A bootstrap step resolves Cloudflare creds from the one secret.
+2. DockFlare creates/owns a Cloudflare Tunnel and its own `cloudflared`.
+3. Each OmniRoute **version** runs from `diegosouzapw/omniroute:<version>` (no build).
+4. DockFlare reads each container's labels and auto-creates hostname + DNS + ingress.
+5. Reach each version at its own subdomain: `latest.<domain>`, `v3-8-45.<domain>`, …
 
-Run as many versions in parallel as you list — just add them to `versions`.
+Run as many versions in parallel as you list.
 
-## One secret, one variable
+## Access modes
 
-The deploy uses a **single** GitHub Actions secret: `DEPLOY_CONFIG_JSON`.
-It holds one JSON object with everything (Cloudflare creds, target server, the
-OmniRoute versions to run). See [`config.example.json`](config.example.json)
-and [`DEPLOY.md`](DEPLOY.md).
+- **public** (default): internet-facing via Cloudflare Tunnel.
+- **tailscale**: private, tailnet-only. Each version joins your tailnet as its own
+  node; no public DNS. Set `access.mode = "tailscale"` + `access.tailscale.authKey`.
 
-On push to `main` (or manual run), the workflow:
-1. Reads `DEPLOY_CONFIG_JSON`.
-2. Ships this repo to your Docker host over SSH.
-3. Renders `.env` + `docker-compose.omniroute.yml` from the JSON.
-4. Runs `docker compose up -d` and waits until every OmniRoute version is healthy.
+## Deploy targets
 
-## What you need to provide
+| Platform | File |
+| --- | --- |
+| GitHub Actions | [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) |
+| Azure Pipelines | [`azure-pipelines.yml`](azure-pipelines.yml) |
 
-See [`DEPLOY.md`](DEPLOY.md) for the step-by-step. In short:
-- A Cloudflare account: **API token**, **Account ID**, **Zone ID**, and a
-  **base domain** in that zone (e.g. `omni.example.com`).
-- A **Docker host** (any Linux server/VPS with Docker + SSH) — OmniRoute is a
-  long-running service, so it needs a persistent host (it is not serverless).
-- Which **OmniRoute versions** to expose (e.g. `latest`, `3.8.45`).
+Each supports **hosted** runners (deploy to a remote host via SSH — include `server`)
+or **self-hosted / persistent** runners (deploy on the runner's own Docker — omit
+`server`). Both call `scripts/ci-deploy.sh`, which auto-picks local vs remote.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `docker-compose.dockflare.yml` | DockFlare control plane (dockflare + socket-proxy + redis) |
-| `scripts/render.mjs` | Generates `.env` + OmniRoute compose from `config.json` (zero deps) |
-| `scripts/deploy.sh` | Runs on the host: render → `docker compose up` → health wait |
-| `.github/workflows/deploy.yml` | CI: reads the one secret, deploys over SSH |
+| `scripts/cf-bootstrap.mjs` | Resolve Cloudflare account/zone + mint scoped token (zero deps) |
+| `scripts/render.mjs` | Generate `.env` + OmniRoute compose for the chosen access mode |
+| `scripts/deploy.sh` | On-host: bootstrap → render → `docker compose up` → health wait |
+| `scripts/ci-deploy.sh` | Pick local (self-hosted) vs remote (SSH) from the `server` block |
+| `docker-compose.dockflare.yml` | DockFlare control plane (public mode only) |
+| `.github/workflows/deploy.yml` / `azure-pipelines.yml` | CI entrypoints |
 | `config.example.json` | Shape of the single `DEPLOY_CONFIG_JSON` secret |
