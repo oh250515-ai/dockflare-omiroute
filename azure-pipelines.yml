@@ -72,6 +72,6 @@ steps:
     displayName: Save images to cache dir
     condition: always()
 
-  - script: rm -f config.json .cf-resolved.json ~/.ssh/id_deploy || true
+  - script: rm -f config.json .env .df-seed.json ~/.ssh/id_deploy || true
     condition: always()
     displayName: Cleanup
