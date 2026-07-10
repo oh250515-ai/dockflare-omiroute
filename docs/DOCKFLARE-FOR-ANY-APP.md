@@ -1,92 +1,90 @@
-# Kinh nghiệm: dùng DockFlare để expose BẤT KỲ app nào
+# Kinh nghiem: dung DockFlare de expose BAT KY app nao
 
-> Rút ra từ lần triển khai OmniRoute. Áp dụng cho mọi app (n8n, Grafana, Nextcloud,
-> API nội bộ…) muốn đưa ra Internet qua Cloudflare Tunnel mà không mở cổng,
-> không cấu hình dashboard Cloudflare bằng tay.
+> Rut ra tu lan trien khai OmniRoute. Ap dung cho moi app (n8n, Grafana, Nextcloud,
+> API noi bo...) muon dua ra Internet qua Cloudflare Tunnel ma khong mo cong,
+> khong cau hinh dashboard Cloudflare bang tay.
 
-## Mô hình cốt lõi (nhớ 1 câu)
+## Mo hinh cot loi (nho 1 cau)
 
-**DockFlare = control plane. App chỉ cần 3 label + chung 1 network.**
-DockFlare theo dõi Docker, thấy label thì tự tạo **DNS (CNAME) + tunnel ingress + (tùy chọn) Access**.
+**DockFlare = control plane. App chi can 3 label + chung 1 network.**
+DockFlare theo doi Docker, thay label thi tu tao **DNS (CNAME) + tunnel ingress + (tuy chon) Access**.
 
 ```
 [ Internet ] --HTTPS--> [ Cloudflare edge ] --tunnel--> [ cloudflared ] --http--> [ container app:port ]
-         CNAME <slug>.<domain>                                            cùng network cloudflare-net
+         CNAME <slug>.<domain>                                            cung network cloudflare-net
 ```
 
-DockFlare tạo CNAME + ingress từ label, bạn không đụng tay vào dashboard.
+DockFlare tao CNAME + ingress tu label, ban khong dung tay vao dashboard.
+
+> Kien truc repo nay: **compose da commit la nguon su that** (moi app/version 1 service);
+> mot buoc nho `scripts/prepare-env.mjs` dich secret -> `.env` truoc khi `compose up`.
+> Them/sua version = sua thang file compose, KHONG sinh compose dong.
 
 ---
 
-## 1. PORT — hiểu cho đúng (phần hay nhầm nhất)
+## 1. PORT - hieu cho dung (phan hay nham nhat)
 
-**Chỉ có DUY NHẤT một con số port cần quan tâm: cổng NỘI BỘ mà app lắng nghe bên trong container.**
+**Chi co DUY NHAT mot con so port can quan tam: cong NOI BO ma app lang nghe ben trong container.**
 
-- Đó là con số đặt trong `dockflare.service=http://<ten-container>:<port-noi-bo>`.
-- **KHÔNG** cần `ports:` (publish ra host) trong public mode. Tunnel đi outbound từ
-  cloudflared tới container qua network nội bộ, không qua cổng host.
-- Nhiều app **cùng dùng port nội bộ giống nhau vẫn OK**, miễn là **khác tên container**.
-  Ví dụ repo này chạy `omniroute-latest:20128` và `omniroute-v3-8-45:20128` song song:
-  cùng 20128 nhưng là 2 container riêng, DockFlare định tuyến theo hostname nên không đụng nhau.
+- Do la con so dat trong `dockflare.service=http://<ten-container>:<port-noi-bo>`.
+- **KHONG** can `ports:` (publish ra host) trong public mode. Tunnel di outbound tu
+  cloudflared toi container qua network noi bo, khong qua cong host.
+- Nhieu app **cung port noi bo van OK**, mien **khac ten container**. Repo nay chay
+  `omniroute-latest:20128` va `omniroute-v3-8-45:20128` song song: cung 20128, 2 container
+  rieng, DockFlare dinh tuyen theo hostname.
 
-**Cái gây xung đột thật sự:**
+**Cai gay xung dot that su:**
 
-| Thứ | Có xung đột khi trùng? | Ghi chú |
+| Thu | Trung co xung dot? | Ghi chu |
 | --- | --- | --- |
-| Port nội bộ (trong container) | **Không** | Mỗi container có network namespace riêng |
-| Tên container (`container_name`) | **Có** | Phải duy nhất trên 1 host |
-| Port publish ra host (`ports: "X:Y"`) | **Có** nếu trùng X | Tránh publish trong public mode |
-| Hostname (`dockflare.hostname`) | **Có** | Mỗi CNAME phải duy nhất |
+| Port noi bo (trong container) | **Khong** | Moi container co namespace rieng |
+| `container_name` | **Co** | Phai duy nhat tren 1 host |
+| Port publish ra host (`ports: "X:Y"`) | **Co** neu trung X | Tranh publish trong public mode |
+| `dockflare.hostname` | **Co** | Moi CNAME phai duy nhat |
 
-**Biết port nội bộ của app bằng cách nào?**
-- Xem README/Dockerfile của app: dòng `EXPOSE`, hoặc biến `PORT`.
-- OmniRoute: 20128. n8n: 5678. Grafana: 3000. Nextcloud: 80. code-server: 8080. Uptime Kuma: 3001.
-- Nếu app cho đổi port qua env (ví dụ `PORT=...`), đặt env đó và khớp với số trong `dockflare.service`.
+**Biet port noi bo cua app:** xem `EXPOSE`/`PORT` trong README/Dockerfile. OmniRoute 20128,
+n8n 5678, Grafana 3000, Nextcloud 80, code-server 8080, Uptime Kuma 3001.
 
 ---
 
-## 2. LABEL — tên label, cách tạo CNAME
+## 2. LABEL - ten label, cach tao CNAME
 
-### 3 label tối thiểu
+### 3 label toi thieu
 
 ```yaml
 labels:
-  - dockflare.enable=true                    # bật DockFlare cho container này
-  - dockflare.hostname=app.example.com       # => tạo CNAME 'app' trong zone example.com
-  - dockflare.service=http://myapp:8080      # đích nội bộ: http://<ten-container>:<port-noi-bo>
+  - dockflare.enable=true                    # bat DockFlare cho container nay
+  - dockflare.hostname=app.example.com       # => tao CNAME 'app' trong zone example.com
+  - dockflare.service=http://myapp:8080      # dich noi bo: http://<ten-container>:<port-noi-bo>
 ```
 
-### CNAME được tạo như thế nào
+### CNAME duoc tao nhu the nao
 
-- `dockflare.hostname=app.example.com` -> DockFlare tra zone chứa `example.com`, tạo **CNAME**
-  `app` trỏ tới `<tunnel-id>.cfargotunnel.com` (proxied). Không cần tạo DNS tay.
-- Domain (hoặc domain cha) **phải đã nằm trong Cloudflare** (NS trỏ về Cloudflare).
-- Subdomain nhiều cấp cũng được: `v1.api.example.com` -> CNAME `v1.api`.
-- Repo này sinh hostname theo version qua `slug()` trong `scripts/render.mjs`:
-  `latest` -> `latest.<domain>`, `3.8.45` -> `v3-8-45.<domain>` (thay ký tự lạ bằng `-`, thêm tiền tố `v`).
+- `dockflare.hostname=app.example.com` -> DockFlare tra zone chua `example.com`, tao **CNAME**
+  `app` tro toi `<tunnel-id>.cfargotunnel.com` (proxied). Khong can tao DNS tay.
+- Domain (hoac domain cha) **phai da nam trong Cloudflare**.
+- Trong repo nay hostname lay tu `${BASE_DOMAIN}` (dien san vao `.env` tu `cloudflare.domain`).
 
-### Bảng label hay dùng
+### Bang label hay dung
 
-| Label | Tác dụng | Ví dụ |
+| Label | Tac dung | Vi du |
 | --- | --- | --- |
-| `dockflare.enable` | Bật quản lý | `true` |
-| `dockflare.hostname` | Hostname công khai -> CNAME | `app.example.com` |
-| `dockflare.service` | Đích nội bộ | `http://myapp:8080` |
-| `dockflare.zonename` | Ép zone nếu khác domain mặc định | `otherdomain.com` |
-| `dockflare.no_tls_verify` | Bỏ verify TLS khi origin là https self-signed | `true` |
-| `dockflare.access.policy` | Yêu cầu đăng nhập | `authenticate` |
-| `dockflare.access.email` | Danh sách email/domain được phép | `you@x.com,@x.com` |
-| `dockflare.access.group` | Gán Access Group có sẵn | `nas-family` |
+| `dockflare.enable` | Bat quan ly | `true` |
+| `dockflare.hostname` | Hostname cong khai -> CNAME | `app.example.com` |
+| `dockflare.service` | Dich noi bo | `http://myapp:8080` |
+| `dockflare.zonename` | Ep zone neu khac domain mac dinh | `otherdomain.com` |
+| `dockflare.no_tls_verify` | Bo verify TLS khi origin https self-signed | `true` |
+| `dockflare.access.policy` | Yeu cau dang nhap | `authenticate` |
+| `dockflare.access.email` | Email/domain duoc phep | `you@x.com,@x.com` |
+| `dockflare.access.group` | Gan Access Group co san | `nas-family` |
 
-### Nhiều route cho cùng container (path-based, label đánh số)
+### Nhieu route cho cung container (path-based, label danh so)
 
 ```yaml
 labels:
   - dockflare.enable=true
-  # route chính
   - dockflare.hostname=app.example.com
   - dockflare.service=http://myapp:8080
-  # route phụ theo path
   - dockflare.0.hostname=app.example.com
   - dockflare.0.path=/api
   - dockflare.0.service=http://myapp-api:9000
@@ -94,15 +92,14 @@ labels:
 
 ---
 
-## 3. VÍ DỤ — thay OmniRoute bằng app khác (nhiều kiểu cài)
+## 3. VI DU - thay OmniRoute bang app khac (nhieu kieu cai)
 
-Tất cả đều chung 3 điều kiện: **container nằm trên `cloudflare-net`**, **có 3 label**,
-**`dockflare.service` trỏ đúng port nội bộ**. Khác nhau chỉ ở chỗ lấy image ở đâu.
+Tat ca chung 3 dieu kien: **container nam tren `cloudflare-net`**, **co 3 label**,
+**`dockflare.service` tro dung port noi bo**. Khac nhau chi o cho lay image o dau.
 
-### 3a. Dùng image Docker có sẵn (đơn giản nhất — giống OmniRoute)
+### 3a. Image Docker co san (don gian nhat - giong OmniRoute)
 
 ```yaml
-# docker-compose.yml
 services:
   n8n:
     image: n8nio/n8n:latest
@@ -110,30 +107,28 @@ services:
     restart: unless-stopped
     environment:
       - N8N_PORT=5678
-      - WEBHOOK_URL=https://n8n.example.com/    # app cần biết URL công khai
+      - WEBHOOK_URL=https://n8n.example.com/
     volumes:
       - n8n-data:/home/node/.n8n
     networks: [cloudflare-net]
     labels:
       - dockflare.enable=true
       - dockflare.hostname=n8n.example.com
-      - dockflare.service=http://n8n:5678         # 5678 = port nội bộ của n8n
+      - dockflare.service=http://n8n:5678
 volumes:
   n8n-data:
 networks:
-  cloudflare-net:
-    name: cloudflare-net
-    external: true
+  cloudflare-net: { name: cloudflare-net, external: true }
 ```
 
-### 3b. Build trực tiếp từ source (repo có Dockerfile)
+### 3b. Build truc tiep tu source (repo co Dockerfile)
 
 ```yaml
 services:
   myapp:
     build:
-      context: ./myapp          # thư mục chứa Dockerfile (clone sẵn hoặc submodule)
-      # target: runner          # nếu Dockerfile nhiều stage
+      context: ./myapp
+      # target: runner
     container_name: myapp
     restart: unless-stopped
     environment:
@@ -147,11 +142,9 @@ networks:
   cloudflare-net: { name: cloudflare-net, external: true }
 ```
 
-Lưu ý: build tốn thời gian + RAM trên host/runner. Ưu tiên image dựng sẵn nếu có.
+Build ton thoi gian + RAM tren host/runner. Uu tien image dung san neu co.
 
-### 3c. App cài bằng npm / Node (không có image chính thức)
-
-Dùng image `node` chung rồi `npm i -g` app lúc khởi động — không cần viết Dockerfile:
+### 3c. App cai bang npm / Node (khong co image chinh thuc)
 
 ```yaml
 services:
@@ -176,97 +169,103 @@ networks:
   cloudflare-net: { name: cloudflare-net, external: true }
 ```
 
-Bẫy: app **phải bind 0.0.0.0**, không phải `127.0.0.1` — nếu chỉ nghe loopback,
-cloudflared ở container khác sẽ không tới được.
+Bay: app **phai bind 0.0.0.0**, khong phai `127.0.0.1`.
 
-### 3d. App/VM ngoài Docker (manual rule)
+### 3d. App/VM ngoai Docker (manual rule)
 
-App chạy trực tiếp trên máy (systemd, VM khác…): không gắn label được thì vào **UI DockFlare
--> Manual Rules**, khai hostname + service URL (ví dụ `http://192.168.1.50:8096`). DockFlare
-vẫn tạo CNAME + ingress như với container.
+Khong gan label duoc thi vao **UI DockFlare -> Manual Rules**, khai hostname + service URL
+(vi du `http://192.168.1.50:8096`). DockFlare van tao CNAME + ingress.
 
 ---
 
-## 4. Checklist triển khai app mới (đúng thứ tự)
+## 4. Checklist trien khai app moi (dung thu tu)
 
-1. DockFlare đã **Operational** (có file config mã hóa trong volume, không phải chỉ set env).
-2. `docker network create cloudflare-net` (external) đã tồn tại.
-3. Domain nằm trong zone Cloudflare của account.
-4. Token đủ quyền **account + zone** (Tunnel Write, DNS Write, Zone Read, Account Settings Read).
-5. Container app: `networks: [cloudflare-net]` + 3 label + `dockflare.service` trỏ đúng port nội bộ.
-6. App bind trên `0.0.0.0`, không publish port ra host.
-7. `docker compose up -d` -> chờ ~1-2 phút -> kiểm tra CNAME + mở URL.
+1. DockFlare da **Operational** (co file config ma hoa trong volume, khong phai chi set env).
+2. `docker network create cloudflare-net` (external) da ton tai.
+3. Domain nam trong zone Cloudflare cua account.
+4. Token du quyen **account + zone** (Tunnel Write, DNS Write, Zone Read, Account Settings Read).
+5. Container app: `networks: [cloudflare-net]` + 3 label + `dockflare.service` tro dung port noi bo.
+6. App bind `0.0.0.0`, khong publish port ra host.
+7. Neu app co phien dang nhap: cap secret ky cookie (vi du `JWT_SECRET`) va co secure-cookie
+   khi chay sau HTTPS - neu khong se bi vong lap login (xem bay ben duoi).
+8. `docker compose up -d` -> cho ~1-2 phut -> kiem CNAME + mo URL.
 
 ---
 
-## 5. BẪY thường gặp
+## 5. BAY thuong gap
 
-| Bẫy | Hậu quả | Tránh bằng cách |
+| Bay | Hau qua | Tranh bang cach |
 | --- | --- | --- |
-| Quên `networks: [cloudflare-net]` | DockFlare không thấy / connector không tới app | Luôn gắn network chung |
-| App nghe `127.0.0.1` thay vì `0.0.0.0` | Tunnel trả 502 | Bắt app bind 0.0.0.0 / `HOST=0.0.0.0` |
-| `dockflare.service` dùng port đã publish ra host | Sai đích | Dùng port NỘI BỘ + tên container |
-| Trùng `container_name` | Compose lỗi / ghi đè | Mỗi app 1 tên duy nhất |
-| Trùng `dockflare.hostname` | 2 app tranh 1 CNAME | Mỗi app 1 hostname |
-| DockFlare chưa Operational (mới set env) | Không tạo tunnel/DNS | Seed config mã hóa (xem README lỗi #2) |
-| Token thiếu quyền account | Tunnel 403 code 10000 | Cấp group account+zone (README lỗi #4) |
-| Healthcheck báo unhealthy nhưng app chạy | Chờ vô ích | Chấp nhận "serving HTTP" (README lỗi #7) |
-| App SQLite bị `docker stop` đột ngột | Hỏng dữ liệu | Đặt `stop_grace_period` đủ dài |
+| Quen `networks: [cloudflare-net]` | DockFlare khong thay / connector khong toi app | Luon gan network chung |
+| App nghe `127.0.0.1` thay vi `0.0.0.0` | Tunnel tra 502 | Bat app bind 0.0.0.0 / `HOST=0.0.0.0` |
+| `dockflare.service` dung port da publish ra host | Sai dich | Dung port NOI BO + ten container |
+| Trung `container_name` | Compose loi / ghi de | Moi app 1 ten duy nhat |
+| Trung `dockflare.hostname` | 2 app tranh 1 CNAME | Moi app 1 hostname |
+| DockFlare chua Operational (moi set env) | Khong tao tunnel/DNS | Seed config ma hoa (README loi #2) |
+| Token thieu quyen account | Tunnel 403 code 10000 | Cap group account+zone theo scope (README loi #4) |
+| Healthcheck bao unhealthy nhung app chay | Cho vo ich | Chap nhan "serving HTTP" (README loi #7) |
+| App co login nhung thieu secret ky cookie / secure-cookie | Dang nhap xong bi da ve /login | Cap `JWT_SECRET` co dinh + `AUTH_COOKIE_SECURE=true` (README loi #8) |
+| App SQLite bi `docker stop` dot ngot | Hong du lieu | Dat `stop_grace_period` du dai |
 
 ---
 
-## 6. PROMPT MẪU cho AI agent triển khai app mới
+## 6. PROMPT MAU cho AI agent trien khai app moi
 
-Copy nguyên khối dưới, thay phần `[...]`, giao cho agent:
+Copy nguyen khoi duoi, thay phan `[...]`, giao cho agent:
 
 ```
-Nhiệm vụ: expose app [TÊN APP] ra Internet qua Cloudflare Tunnel, dùng DockFlare làm
-control plane, theo đúng mô hình repo dockflare-omiroute (config-only, ít code nhất).
+Nhiem vu: expose app [TEN APP] ra Internet qua Cloudflare Tunnel, dung DockFlare lam
+control plane, theo dung mo hinh repo dockflare-omiroute (config-only, it code nhat):
+compose da commit la nguon su that; mot buoc prepare-env dich secret -> .env; khong sinh compose.
 
 Input:
-- App: [image docker / repo source / cách cài npm]
-- Port nội bộ app lắng nghe: [SỐ, xem EXPOSE/PORT của app]
-- Hostname mong muốn: [sub.domain.com] (domain đã nằm trong Cloudflare)
-- Biến môi trường app cần (nếu có): [ví dụ base URL, API key]
+- App: [image docker / repo source / cach cai npm]
+- Port noi bo app lang nghe: [SO, xem EXPOSE/PORT]
+- Hostname mong muon: [sub.domain.com] (domain da nam trong Cloudflare)
+- Bien moi truong app can (neu co): [base URL, secret ky session, API key...]
 
-Yêu cầu:
-1. Không viết code app. Chỉ viết docker-compose + label. Tận dụng image dựng sẵn nếu có.
-2. Container phải: nằm trên network external `cloudflare-net`; có 3 label
+Yeu cau:
+1. Khong viet code app. Them service vao docker-compose (commit san) + label. Image dung san neu co.
+2. Container phai: tren network external `cloudflare-net`; 3 label
    dockflare.enable=true, dockflare.hostname=<hostname>, dockflare.service=http://<ten-container>:<port-noi-bo>.
-3. App phải bind 0.0.0.0, KHÔNG publish port ra host (public mode dùng tunnel).
-4. Không đặt trùng container_name và không trùng hostname với service khác.
-5. Nếu app dùng SQLite/ghi đĩa: mount volume + đặt stop_grace_period hợp lý.
+3. App bind 0.0.0.0, KHONG publish port ra host.
+4. Khong trung container_name, khong trung hostname.
+5. App co login: cap secret ky cookie co dinh + bat secure-cookie (sau HTTPS).
+6. App ghi dia/SQLite: mount volume + stop_grace_period hop ly.
 
-Trước khi báo xong PHẢI tự kiểm (self-check), nêu rõ kết quả từng mục:
-- [ ] DockFlare đang Operational (có dockflare_config.dat), KHÔNG chỉ dựa vào CF_API_TOKEN env.
-- [ ] Token có quyền account (tạo được tunnel) — xác minh bằng list cfd_tunnel.
-- [ ] CNAME <hostname> đã xuất hiện (dns Status:0), không còn NXDOMAIN.
-- [ ] cloudflared connector đang chạy.
-- [ ] curl https://<hostname> trả 2xx/3xx (không 502).
+Truoc khi bao xong PHAI self-check, neu ro tung muc:
+- [ ] DockFlare Operational (co dockflare_config.dat), KHONG chi dua CF_API_TOKEN env.
+- [ ] Token co quyen account (list cfd_tunnel OK).
+- [ ] CNAME <hostname> da co (dns Status:0), khong NXDOMAIN.
+- [ ] cloudflared connector dang chay.
+- [ ] curl https://<hostname> tra 2xx/3xx (khong 502).
+- [ ] Neu co login: dang nhap roi click link khong bi da ra.
 
-BẪY PHẢI TRÁNH (đã từng dính, đừng lặp lại):
-- Đừng tưởng set CF_API_TOKEN env là DockFlare tự cấu hình — SAI, phải có file config
-  mã hóa (seed headless bằng chính image DockFlare, hoặc chạy wizard 1 lần).
-- Đừng match Cloudflare permission-group theo TÊN (Cloudflare đã đổi tên) — cấp theo scope.
-  Token thiếu quyền account -> tạo tunnel 403 code 10000, DNS không bao giờ lên.
-- Đừng chỉ dựa vào Docker healthcheck để kết luận app hỏng — nhiều app báo unhealthy
-  giả (false-negative) dù vẫn serve. Kiểm bằng curl HTTP thực tế.
-- Đừng bind app vào 127.0.0.1; phải 0.0.0.0, nếu không tunnel 502.
-- Đừng publish port ra host trong public mode (thừa + dễ trùng). Tunnel đi nội bộ.
-- Đừng quên `networks: [cloudflare-net]` — thiếu là DockFlare không route được.
-- Khi shell đọc output từ node bằng `read`: nhớ newline cuối (dùng console.log), tránh
-  `set -e` giết script ở dòng đầu.
+BAY PHAI TRANH (da tung dinh, dung lap lai):
+- Dung tuong set CF_API_TOKEN env la DockFlare tu cau hinh - phai co file config ma hoa
+  (seed headless bang chinh image DockFlare, hoac wizard 1 lan).
+- Dung match Cloudflare permission-group theo TEN (da bi doi ten) - cap theo scope. Thieu
+  quyen account -> tunnel 403 code 10000, DNS khong len.
+- Dung chi dua Docker healthcheck de ket luan app hong - nhieu app unhealthy gia. Kiem curl that.
+- Dung de app login ma thieu secret ky cookie - se vong lap /login. Sau HTTPS can secure-cookie.
+- Dung bind 127.0.0.1; phai 0.0.0.0.
+- Dung publish port ra host trong public mode.
+- Dung quen `networks: [cloudflare-net]`.
+- Shell doc output node bang `read`: nho newline cuoi (console.log), tranh `set -e` giet script.
 
-Khi kẹt, chạy scripts/diagnose.sh và soi theo thứ tự: log DockFlare (tunnel/CF API) ->
-connector cloudflared -> DNS live -> health app.
+Khi ket, chay scripts/diagnose.sh va soi: log DockFlare (tunnel/CF API) -> connector
+cloudflared -> DNS live -> health app.
 ```
 
 ---
 
-## 7. Debug nhanh khi hostname không lên
+## 7. Debug nhanh khi hostname khong len
 
-Dùng `scripts/diagnose.sh` (9 mục). Thứ tự soi:
-1. **Log DockFlare (mục 4)** — có tạo được tunnel không? 403/code 10000 = thiếu quyền token.
-2. **Connector cloudflared (mục 6)** — chưa có = tunnel chưa tạo.
-3. **DNS live (mục 8)** — Status:3 = chưa có CNAME; Status:0 = có rồi.
-4. **Health app (mục 7)** — 502 qua tunnel = app chưa serve / bind sai / sai port.
+Dung `scripts/diagnose.sh` (9 muc). Thu tu soi:
+1. **Log DockFlare (muc 4)** - co tao duoc tunnel khong? 403/code 10000 = thieu quyen token.
+2. **Connector cloudflared (muc 6)** - chua co = tunnel chua tao.
+3. **DNS live (muc 8)** - Status:3 = chua co CNAME; Status:0 = co roi.
+4. **Health app (muc 7)** - 502 qua tunnel = app chua serve / bind sai / sai port.
+
+> Buoc dich secret -> env nam o `scripts/prepare-env.mjs` (Cloudflare token/account/zone +
+> secret phien cho app). Compose doc cac gia tri nay tu `.env`.
